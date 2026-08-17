@@ -1,0 +1,35 @@
+conda-server release {{ .Release.Name }} installed in namespace {{ .Release.Namespace }}.
+
+API endpoint:
+{{- if .Values.ingress.enabled }}
+  https://{{ .Values.ingress.host }}
+{{- else }}
+  Cluster-internal: http://{{ include "conda-server.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+  Port-forward to test:
+    kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "conda-server.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+{{- end }}
+
+{{- if .Values.postgresql.enabled }}
+
+Bundled Postgres is enabled — make sure to back the chart's PVC up;
+for production switch to externalDatabase.url against a managed/HA
+cluster.
+{{- end }}
+
+{{- if and (eq .Values.storage.backend "s3") (not .Values.bucketCors.enabled) }}
+
+NOTE: storage.backend=s3 but bucketCors is disabled. The browser
+"Show files" feature on the package detail page won't work cross-
+origin until the bucket has a CORS rule allowing {{ .Values.app.baseUrl }}.
+Either enable bucketCors here or apply the rule via your cloud
+provider's UI.
+{{- end }}
+
+{{- if not .Values.app.oidc.issuer }}
+
+NOTE: app.oidc.issuer is unset — the API will not let anyone log in.
+Configure an OIDC provider before opening this to real users.
+{{- end }}
+
+Docs: deploy/helm/conda-server/README.md
+Production walkthrough: docs/deploying.md

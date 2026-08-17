@@ -1,0 +1,51 @@
+host = "0.0.0.0"
+port = 8000
+base_url = "http://localhost:8000"
+
+[database]
+url = "sqlite+aiosqlite:///./conda-server.db"
+echo = false
+# Connection pool sizing (ignored by SQLite; relevant for Postgres).
+pool_size = 5
+max_overflow = 10
+
+[storage]
+backend = "local"         # local | s3 | azure | gcs
+url = "./data"            # for s3: "s3://bucket/prefix"; for azure: "az://container/prefix"
+# region = "eu-west-1"
+# access_key_id = "..."
+# secret_access_key = "..."
+# endpoint = "..."
+presign_ttl_seconds = 900
+
+[auth]
+# Generate with: openssl rand -hex 32
+session_secret = "change-me-in-production"
+session_https_only = true
+initial_admins = []       # list of emails granted admin on first login (case-insensitive)
+
+[auth.oidc]
+# Any OIDC-compliant issuer. Discovery URL is {issuer}/.well-known/openid-configuration.
+# Authentik example (trailing slash matters):
+#   issuer = "https://authentik.example.com/application/o/conda-server/"
+# Keycloak example:
+#   issuer = "https://keycloak.example.com/realms/<realm>"
+# issuer = ""
+# client_id = ""
+# client_secret = ""
+# scopes = ["openid", "email", "profile"]
+
+[upload]
+# Per-file and per-request caps for admin package uploads.
+max_file_bytes = 1073741824    # 1 GiB
+max_total_bytes = 4294967296   # 4 GiB
+
+[cleanup]
+# Terminal (completed | failed) ImportJob rows older than this are deleted
+# by the in-pod cleanup loop. Set ttl to 0 to keep all rows forever.
+import_job_ttl_days = 30
+interval_seconds = 3600
+
+[logging]
+level = "INFO"
+format = "json"   # json | console

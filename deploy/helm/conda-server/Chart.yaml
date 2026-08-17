@@ -1,0 +1,19 @@
+apiVersion: v2
+name: conda-server
+description: A modern, open-source conda package server built on the rattler ecosystem.
+type: application
+version: 0.1.0
+appVersion: "0.0.1"
+home: https://github.com/Krande/conda-server
+sources:
+  - https://github.com/Krande/conda-server
+maintainers:
+  - name: Kristoffer Andersen
+    email: Krande@users.noreply.github.com
+keywords:
+  - conda
+  - rattler
+  - package-server
+  - mamba
+  - pixi
+icon: ""

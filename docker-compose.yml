@@ -1,0 +1,35 @@
+services:
+  conda-server:
+    build: .
+    image: conda-server:dev
+    ports:
+      - "8000:8000"
+    environment:
+      CONDA_SERVER_DATABASE__URL: postgresql+asyncpg://conda:conda@db:5432/conda
+      CONDA_SERVER_STORAGE__BACKEND: local
+      CONDA_SERVER_STORAGE__URL: /data
+      CONDA_SERVER_AUTH__SESSION_SECRET: dev-secret-not-for-prod
+      CONDA_SERVER_AUTH__SESSION_HTTPS_ONLY: "false"
+      CONDA_SERVER_LOGGING__FORMAT: console
+    volumes:
+      - conda-data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: conda
+      POSTGRES_PASSWORD: conda
+      POSTGRES_DB: conda
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conda"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  conda-data:
+  pg-data:

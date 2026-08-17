@@ -1,0 +1,83 @@
+{{- if .Values.migrationJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Hook + revision suffix is required so each chart upgrade gets its
+  # own Job rather than colliding on a name that already exists from
+  # the prior install.
+  name: {{ include "conda-server.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "conda-server.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.postgresql.enabled }}
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.37
+          command: ["sh", "-c"]
+          args:
+            - |
+              until nc -z {{ include "conda-server.fullname" . }}-db 5432; do
+                echo "waiting for db..."
+                sleep 2
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "conda-server.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # args: not command: — preserves the Dockerfile's pixi
+          # shell-hook ENTRYPOINT so SSL_CERT_FILE/PATH/etc. are set.
+          args: ["alembic", "upgrade", "head"]
+          env:
+            - name: SSL_CERT_FILE
+              value: "/app/.pixi/envs/default/ssl/cacert.pem"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "conda-server.secretName" . }}
+                  key: {{ .Values.secretKeys.dbPassword }}
+                  optional: {{ not .Values.postgresql.enabled }}
+            - name: CONDA_SERVER_DATABASE__URL
+              value: {{ include "conda-server.dbUrl" . | quote }}
+            - name: CONDA_SERVER_LOGGING__FORMAT
+              value: {{ .Values.app.logFormat | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- end }}

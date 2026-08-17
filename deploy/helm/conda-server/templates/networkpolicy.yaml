@@ -1,0 +1,52 @@
+{{- if .Values.networkPolicy.enabled }}
+# Ingress: traffic FROM the namespaces in .Values.networkPolicy.ingressFromNamespaces
+# (typically the cluster's ingress controller) TO the API pod on the
+# service port. Egress is intentionally not constrained here — the app
+# legitimately needs DNS, the database, the S3 endpoint, the OIDC
+# issuer, and any upstream channel for mirror / import-from-upstream.
+# Locking egress down requires deployment-specific knowledge an
+# operator should add on top of the chart.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "conda-server.fullname" . }}
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "conda-server.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+      {{- range .Values.networkPolicy.ingressFromNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+      {{- end }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.service.port }} }
+{{- if .Values.postgresql.enabled }}
+---
+# Postgres: only accept 5432 from pods in this namespace (the API +
+# any backup PreBackupPod the cluster operator may have added). k8up's
+# backup pod doesn't carry a label we can match on cluster-portably,
+# so we open it to the whole namespace rather than just the API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "conda-server.fullname" . }}-db
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "conda-server.dbSelectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 5432 }
+{{- end }}
+{{- end }}

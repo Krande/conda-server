@@ -1,0 +1,26 @@
+name: Test
+
+# Runs the Python test suite in the `dev` pixi environment. Independent of the
+# other CI workflows so it reports its own required status check. Add more
+# checks (typecheck, e2e) as sibling workflow files following this skeleton.
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.8
+        with:
+          environments: dev
+          locked: true
+
+      - run: pixi run -e dev test

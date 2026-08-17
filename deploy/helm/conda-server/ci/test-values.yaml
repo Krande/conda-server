@@ -1,0 +1,24 @@
+# CI / dev install scenario: bundled Postgres + local storage + ingress off.
+app:
+  baseUrl: "http://conda.local"
+  initialAdmins: ["admin@example.com"]
+  sessionHttpsOnly: false
+
+postgresql:
+  enabled: true
+
+storage:
+  backend: local
+  url: /data
+
+secrets:
+  values:
+    sessionSecret: "test-secret-not-for-production"
+    dbPassword: "test-db-password"
+
+ingress:
+  enabled: true
+  host: conda.local
+
+networkPolicy:
+  enabled: true

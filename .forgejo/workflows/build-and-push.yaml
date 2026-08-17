@@ -1,0 +1,84 @@
+name: Build and push conda-server
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+# Infra-specific values (git host, image repo, gitops repo, CI identity) are
+# kept out of the repo and supplied as Actions secrets so this workflow can be
+# published without leaking the deployment environment. Required secrets:
+#   FORGEJO_HOST         - git host, e.g. git.example.com
+#   HARBOR_IMAGE         - fully-qualified image repo, e.g. registry.example.com/library/conda-server
+#   HARBOR_DOCKER_CONFIG - ~/.docker/config.json contents with registry creds
+#   GITOPS_REPO          - <owner>/<repo> of the gitops repo (optional)
+#   K8S_GITOPS_TOKEN     - PAT with write:repository on the gitops repo (optional)
+#   CI_EMAIL             - committer email for the gitops bump (optional)
+jobs:
+  build:
+    runs-on: docker-build
+    env:
+      FORGEJO_HOST: ${{ secrets.FORGEJO_HOST }}
+      HARBOR_IMAGE: ${{ secrets.HARBOR_IMAGE }}
+    steps:
+      - name: Checkout
+        run: |
+          git clone \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@${FORGEJO_HOST}/$GITHUB_REPOSITORY.git" \
+            .
+
+      - name: Login to Harbor
+        run: |
+          mkdir -p ~/.docker
+          echo '${{ secrets.HARBOR_DOCKER_CONFIG }}' > ~/.docker/config.json
+
+      - name: Build and push image
+        run: |
+          TAG="sha-${GITHUB_SHA::7}"
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          docker build \
+            --build-arg GIT_SHA=${GITHUB_SHA} \
+            --build-arg BUILD_DATE=${BUILD_DATE} \
+            -t "${HARBOR_IMAGE}:${TAG}" \
+            -t "${HARBOR_IMAGE}:latest" \
+            .
+          docker push "${HARBOR_IMAGE}:${TAG}"
+          docker push "${HARBOR_IMAGE}:latest"
+
+      - name: Update image tag in gitops
+        env:
+          GITOPS_TOKEN: ${{ secrets.K8S_GITOPS_TOKEN }}
+          GITOPS_REPO: ${{ secrets.GITOPS_REPO }}
+          CI_EMAIL: ${{ secrets.CI_EMAIL }}
+        run: |
+          test -n "$GITOPS_TOKEN" && test -n "$GITOPS_REPO" || {
+            echo "K8S_GITOPS_TOKEN / GITOPS_REPO not set — skipping gitops update."
+            exit 0
+          }
+
+          TAG="sha-${GITHUB_SHA::7}"
+          WORK=$(mktemp -d)
+          cd "$WORK"
+          git clone "https://x-access-token:${GITOPS_TOKEN}@${FORGEJO_HOST}/${GITOPS_REPO}.git" .
+          git config user.name "Forgejo CI"
+          git config user.email "${CI_EMAIL:-ci@example.com}"
+
+          MANIFEST=workloads/conda-server/deployment.yaml
+          if [ ! -f "$MANIFEST" ]; then
+            echo "$MANIFEST does not exist yet; skipping."
+            exit 0
+          fi
+
+          for i in 1 2 3; do
+            git pull --rebase origin main
+            sed -i "s|image: ${HARBOR_IMAGE}:.*|image: ${HARBOR_IMAGE}:${TAG}|" "$MANIFEST"
+            git add "$MANIFEST"
+            git diff --cached --quiet && exit 0
+            git commit -m "[skip ci] ci: update conda-server to ${TAG}"
+            git push origin HEAD:main && exit 0
+            echo "Push failed (attempt $i), retrying..."
+            git reset --hard origin/main
+            sleep 2
+          done
+          echo "Failed to push after 3 attempts" >&2
+          exit 1

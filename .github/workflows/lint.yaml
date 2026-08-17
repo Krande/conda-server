@@ -1,0 +1,26 @@
+name: Lint
+
+# Runs the pinned ruff formatter check + linter (the `lint` pixi environment,
+# see pixi.toml / action_config.toml). Independent of the other CI workflows so
+# it reports its own required status check.
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.8
+        with:
+          environments: lint
+          locked: true
+
+      - run: pixi run lint

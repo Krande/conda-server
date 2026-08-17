@@ -1,0 +1,22 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* Monospace for code-like surfaces */
+code,
+pre,
+kbd {
+  font-family: JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace;
+}

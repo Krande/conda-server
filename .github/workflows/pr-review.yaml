@@ -1,0 +1,198 @@
+name: Review Pull Request
+
+# Self-contained PR linter — no dependency on any external reusable workflow.
+#
+# It checks conventional-commit PR hygiene and computes the next
+# semantic-release version, then posts (and keeps updated) a single sticky
+# Markdown comment on the PR. It is a DETERMINISTIC linter — there is no
+# AI/LLM and no external API; commenting uses the built-in GITHUB_TOKEN.
+#
+# Checks performed:
+#   * PR title starts with a conventional-commit prefix (fix:/feat:/chore:/! )
+#   * Exactly one release-* label is present (missing → auto-adds release-skip)
+#   * Next release version, via python-semantic-release --noop (informational)
+#
+# Lint / test / typecheck live in their own sibling workflows (lint.yaml,
+# test.yaml) so each reports an independent status check.
+#
+# pull_request_target is used so the job (and GITHUB_TOKEN) can comment and
+# label even on fork PRs. It deliberately checks out the BASE ref only and
+# never executes any code from the PR head, so this is safe.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, edited, unlabeled]
+    branches: [main, develop]
+
+permissions:
+  contents: read           # read base ref for the version calc
+  pull-requests: write     # post/delete comments, create + add labels
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-review:
+    name: Check Pull Request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base ref (full history for version calc)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}    # base branch — never the untrusted PR head
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling
+        run: pip install "python-semantic-release==8.5.1"
+
+      - name: Ensure release-label palette + default missing label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const palette = {
+              'release-skip': 'b3b3b3', 'release-auto': 'ffff00',
+              'release-patch': '00ff00', 'release-minor': '0000ff',
+              'release-major': 'ff0000', 'silence-bot': '000000',
+            };
+            const { owner, repo } = context.repo;
+            for (const [name, color] of Object.entries(palette)) {
+              try {
+                await github.rest.issues.createLabel({ owner, repo, name, color });
+              } catch (e) {
+                if (e.status === 422) {
+                  await github.rest.issues.updateLabel({ owner, repo, name, color });
+                } else { throw e; }
+              }
+            }
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            if (!labels.some(l => l.startsWith('release-'))) {
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: context.issue.number, labels: ['release-skip'],
+              });
+            }
+
+      - name: Seed PR title as an empty commit (for the version calc)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          git config user.email "pr-review-bot@users.noreply.github.com"
+          git config user.name "pr-review-bot"
+          git commit --allow-empty -m "$PR_TITLE"
+
+      - name: Run PR checks and build comment body
+        id: review
+        shell: python
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          HAS_SOURCE_KEY: ${{ secrets.SOURCE_KEY != '' }}
+        run: |
+          import base64
+          import json
+          import os
+          import re
+          import subprocess
+
+          def emit(name, value):
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write(f"{name}={value}\n")
+
+          title = os.environ["PR_TITLE"]
+          labels = json.loads(os.environ["LABELS"])
+          has_source_key = os.environ["HAS_SOURCE_KEY"] == "true"
+
+          # --- conventional-commit title check ---
+          valid_prefixes = ("fix: ", "fix!: ", "feat: ", "feat!: ", "chore: ")
+          title_ok = title.startswith(valid_prefixes)
+
+          # --- release-label check (missing was auto-defaulted to release-skip) ---
+          force_flag = {
+              "release-skip": None, "release-auto": None, "release-patch": "--patch",
+              "release-minor": "--minor", "release-major": "--major",
+          }
+          present = [l for l in labels if l in force_flag] or ["release-skip"]
+          multiple = len(present) > 1
+          label_ok = not multiple
+
+          # --- next version via python-semantic-release (best-effort/informational) ---
+          version_line = " * ✅ Skipping release (release-skip)"
+          if not multiple and present[0] != "release-skip":
+              cmd = ["semantic-release", "-c", "action_config.toml", "--noop", "version", "--print"]
+              flag = force_flag[present[0]]
+              if flag:
+                  cmd.append(flag)
+              try:
+                  res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                  ver = (res.stdout or "").strip().splitlines()[-1] if res.stdout.strip() else ""
+                  if ver and re.match(r"^\d+\.\d+\.\d+", ver):
+                      version_line = f' * ✅ Calculated next version: "{ver}"'
+                  else:
+                      version_line = " * ℹ️ No release will be issued for these commits"
+              except Exception as exc:  # noqa: BLE001 — informational line only
+                  version_line = f" * ℹ️ Could not compute next version ({exc})"
+
+          checks_ok = title_ok and label_ok
+          lines = []
+          lines.append(
+              " * ✅ PR title is ok" if title_ok
+              else " * ❌ PR title must start with one of: fix: feat: fix!: feat!: chore:"
+          )
+          lines.append(
+              " * ✅ Exactly one release label" if label_ok
+              else " * ❌ Use exactly one release-* label (skip/auto/patch/minor/major)"
+          )
+          lines.append(
+              " * ✅ SOURCE_KEY secret is set" if has_source_key
+              else " * ℹ️ SOURCE_KEY secret not set (only needed for automated release)"
+          )
+          lines.append(version_line)
+
+          header = ("\U0001f44b I checked your PR and found no issues. Thanks!\n\n"
+                    if checks_ok else
+                    "\U0001f44b I checked your PR and found some things to address:\n\n")
+          body = "# PR Review\n\n" + header + "\n".join(lines) + "\n"
+          emit("body_b64", base64.b64encode(body.encode()).decode())
+          emit("review_ok", "true" if checks_ok else "false")
+
+      - name: Skip commenting when silence-bot label is present
+        id: silence
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        shell: python
+        run: |
+          import json, os
+          labels = json.loads(os.environ["LABELS"])
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"silence={'true' if 'silence-bot' in labels else 'false'}\n")
+
+      - name: Upsert sticky PR comment
+        if: steps.silence.outputs.silence == 'false'
+        uses: actions/github-script@v7
+        env:
+          BODY_B64: ${{ steps.review.outputs.body_b64 }}
+        with:
+          script: |
+            const marker = '<!-- CONDA_SERVER_PR_BOT -->';
+            const { owner, repo } = context.repo;
+            const body = marker + '\n' + Buffer.from(process.env.BODY_B64, 'base64').toString('utf-8');
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: context.issue.number, body });
+            }
+
+      - name: Fail the check if any PR check failed
+        if: steps.review.outputs.review_ok == 'false'
+        run: |
+          echo "PR checks failed — see the bot comment on the PR." >&2
+          exit 1

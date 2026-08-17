@@ -1,0 +1,101 @@
+{{- if .Values.k8up.enabled }}
+{{/*
+k8up wiring: a PreBackupPod that runs pg_dump → stdout, captured by
+k8up's stdin-backup mode and stored in the operator's restic repo.
+Requires:
+  - the k8up operator already installed in the cluster
+  - .Values.k8up.repoPasswordSecret + .restCredentialsSecret pointing at
+    Secrets the operator can read.
+The Schedule itself is purely declarative — the operator picks it up.
+*/}}
+apiVersion: k8up.io/v1
+kind: PodConfig
+metadata:
+  name: {{ include "conda-server.fullname" . }}-backup
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+spec:
+  template:
+    spec:
+      containers:
+        - name: backup
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: k8up.io/v1
+kind: PreBackupPod
+metadata:
+  name: {{ include "conda-server.fullname" . }}-db-dump
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+spec:
+  backupCommand: sh -c 'PGPASSWORD="$PGPASSWORD" pg_dump -h {{ include "conda-server.fullname" . }}-db -U conda-server -d conda-server --clean --if-exists'
+  fileExtension: .sql
+  pod:
+    spec:
+      containers:
+        - name: db-dump
+          image: {{ .Values.postgresql.image }}
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "conda-server.secretName" . }}
+                  key: {{ .Values.secretKeys.dbPassword }}
+          command: [sleep, infinity]
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 70
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: k8up.io/v1
+kind: Schedule
+metadata:
+  name: {{ include "conda-server.fullname" . }}-backup
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+spec:
+  backend:
+    repoPasswordSecretRef:
+      name: {{ .Values.k8up.repoPasswordSecret }}
+      key: password
+    rest:
+      url: rest://placeholder.example/conda-server  # operator picks the URL from RESTIC_REPOSITORY in the rest credentials secret
+      userSecretRef:
+        name: {{ .Values.k8up.restCredentialsSecret }}
+        key: REST_USER
+      passwordSecretRef:
+        name: {{ .Values.k8up.restCredentialsSecret }}
+        key: REST_PASSWORD
+  podConfigRef:
+    name: {{ include "conda-server.fullname" . }}-backup
+  backup:
+    schedule: {{ .Values.k8up.schedules.backup | quote }}
+    failedJobsHistoryLimit: 3
+    successfulJobsHistoryLimit: 3
+    tags: [conda-server, postgres-dump]
+  prune:
+    schedule: {{ .Values.k8up.schedules.prune | quote }}
+    retention:
+      keepLast: {{ .Values.k8up.retention.keepLast }}
+      keepDaily: {{ .Values.k8up.retention.keepDaily }}
+      keepWeekly: {{ .Values.k8up.retention.keepWeekly }}
+      keepMonthly: {{ .Values.k8up.retention.keepMonthly }}
+      keepYearly: {{ .Values.k8up.retention.keepYearly }}
+  check:
+    schedule: {{ .Values.k8up.schedules.check | quote }}
+{{- end }}

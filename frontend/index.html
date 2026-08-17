@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="A modern, open-source conda package server built on the rattler ecosystem." />
+    <title>conda-server</title>
+    <script>
+      // Apply persisted/system theme before paint to avoid a light-mode flash.
+      (function () {
+        try {
+          var s = localStorage.getItem("conda-server:theme");
+          var t = s === "dark" || s === "light"
+            ? s
+            : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+          var r = document.documentElement;
+          if (t === "dark") r.classList.add("dark");
+          r.style.colorScheme = t;
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

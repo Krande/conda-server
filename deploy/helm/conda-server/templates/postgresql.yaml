@@ -1,0 +1,93 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "conda-server.fullname" . }}-db
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "conda-server.fullname" . }}-db
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "conda-server.dbSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "conda-server.dbSelectorLabels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # postgres image runs root → gosu drops to uid 70; fsGroup
+        # makes the data PVC writable by that user.
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: {{ .Values.postgresql.image }}
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              value: conda-server
+            - name: POSTGRES_DB
+              value: conda-server
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "conda-server.secretName" . }}
+                  key: {{ .Values.secretKeys.dbPassword }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "conda-server", "-d", "conda-server"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "conda-server", "-d", "conda-server"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          {{- with .Values.postgresql.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "DAC_READ_SEARCH", "FOWNER", "SETGID", "SETUID"]
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.postgresql.storage.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "conda-server.fullname" . }}-db
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "conda-server.dbSelectorLabels" . | nindent 4 }}
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+{{- end }}

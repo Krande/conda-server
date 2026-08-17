@@ -1,0 +1,52 @@
+# Realistic prod-style scenario: external Postgres + S3-compatible storage +
+# OIDC + CORS + alerts + k8up. Mirrors what a GitOps repo would wire up
+# manually. All hosts/IPs below are RFC 5737 / example.com placeholders.
+app:
+  baseUrl: "https://conda.example.com"
+  initialAdmins: ["ops@example.com"]
+  oidc:
+    issuer: "https://idp.example.com/application/o/conda-server/"
+
+externalDatabase:
+  url: "postgresql+asyncpg://conda-server:$(DB_PASSWORD)@db.example.com:5432/conda-server"
+
+storage:
+  backend: s3
+  url: s3://conda-server
+  endpoint: https://garage-s3.example.com
+  region: us-east-1
+
+secrets:
+  existingSecret: conda-server-vault-secrets
+
+hostAliases:
+  - ip: "192.0.2.10"  # placeholder — your ingress/Traefik cluster IP
+    hostnames:
+      - idp.example.com
+      - garage-s3.example.com
+
+ingress:
+  enabled: true
+  className: traefik
+  host: conda.example.com
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls:
+    - hosts: [conda.example.com]
+      secretName: conda-server-tls
+
+networkPolicy:
+  enabled: true
+
+bucketCors:
+  enabled: true
+  bucket: conda-server
+  endpoint: https://garage-s3.example.com
+  allowedOrigin: https://conda.example.com
+
+k8up:
+  enabled: true
+
+metricsAlerts:
+  enabled: true
+  kind: PrometheusRule

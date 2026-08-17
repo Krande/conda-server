@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pixi/
+build/
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Data / runtime
+data/
+data-test/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+conda-server.toml
+.env
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db

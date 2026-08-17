@@ -1,0 +1,57 @@
+{{- if .Values.metricsAlerts.enabled }}
+{{- $rules := `
+groups:
+  - name: conda-server
+    rules:
+      - alert: CondaServerReindexFailures
+        expr: increase(conda_server_reindex_runs_total{result="failure"}[15m]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "conda-server reindex failures in {{ $labels.channel }}"
+          description: "{{ $value }} reindex failure(s) in the last 15m for channel {{ $labels.channel }}."
+      - alert: CondaServerMirrorUpstreamErrorRate
+        expr: |
+          (
+            sum by (channel) (rate(conda_server_mirror_upstream_fetches_total{result="failure"}[15m]))
+          ) / (
+            sum by (channel) (rate(conda_server_mirror_upstream_fetches_total[15m])) > 0
+          ) > 0.25
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "conda-server mirror upstream errors high in {{ $labels.channel }}"
+          description: ">25% of upstream fetches for {{ $labels.channel }} failed in the last 15m."
+      - alert: CondaServerReindexStuck
+        expr: |
+          increase(conda_server_reindex_duration_seconds_bucket{le="+Inf"}[1h])
+          - increase(conda_server_reindex_duration_seconds_bucket{le="3600.0"}[1h]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "conda-server reindex >1h on {{ $labels.channel }}"
+          description: "Reindex on {{ $labels.channel }} ran longer than 1 hour."
+` -}}
+{{- if eq .Values.metricsAlerts.kind "PrometheusRule" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "conda-server.fullname" . }}
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+spec:
+{{ $rules | indent 2 }}
+{{- else if eq .Values.metricsAlerts.kind "ConfigMap" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "conda-server.fullname" . }}-alerts
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+data:
+  conda-server-alerts.yml: |
+{{ $rules | indent 4 }}
+{{- else }}
+{{- fail (printf "metricsAlerts.kind must be PrometheusRule or ConfigMap, got %q" .Values.metricsAlerts.kind) }}
+{{- end }}
+{{- end }}

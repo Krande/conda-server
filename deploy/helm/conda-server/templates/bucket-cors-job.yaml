@@ -1,0 +1,78 @@
+{{- if .Values.bucketCors.enabled }}
+{{- $cors := .Values.bucketCors -}}
+{{- $bucket := required "bucketCors.bucket is required when bucketCors.enabled" $cors.bucket -}}
+{{- $endpoint := required "bucketCors.endpoint is required" $cors.endpoint -}}
+{{- $origin := required "bucketCors.allowedOrigin is required" $cors.allowedOrigin -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "conda-server.fullname" . }}-cors-{{ .Release.Revision }}
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cors
+          image: {{ $cors.image }}
+          # The image ships curl 8.x with --aws-sigv4 built-in, so we need
+          # neither awscli nor boto3. It must already contain curl: this Job
+          # runs as a non-root UID and cannot install packages at runtime.
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              cat > /tmp/cors.xml <<EOF
+              <?xml version="1.0" encoding="UTF-8"?>
+              <CORSConfiguration>
+                <CORSRule>
+                  <AllowedOrigin>{{ $origin }}</AllowedOrigin>
+                  <AllowedMethod>GET</AllowedMethod>
+                  <AllowedMethod>HEAD</AllowedMethod>
+                  <AllowedHeader>*</AllowedHeader>
+                  <ExposeHeader>Content-Length</ExposeHeader>
+                  <ExposeHeader>Content-Type</ExposeHeader>
+                  <ExposeHeader>Content-Disposition</ExposeHeader>
+                  <ExposeHeader>ETag</ExposeHeader>
+                  <MaxAgeSeconds>3600</MaxAgeSeconds>
+                </CORSRule>
+              </CORSConfiguration>
+              EOF
+              # PutBucketCors is idempotent — overwrites any existing rule.
+              curl -sSf -X PUT \
+                --aws-sigv4 "aws:amz:{{ $cors.region }}:s3" \
+                --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" \
+                --data-binary @/tmp/cors.xml \
+                -H "Content-Type: application/xml" \
+                "{{ $endpoint | trimSuffix "/" }}/{{ $bucket }}?cors"
+              echo "[cors] applied to {{ $bucket }} ← {{ $origin }}"
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "conda-server.secretName" . }}
+                  key: {{ .Values.secretKeys.s3AccessKeyId }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "conda-server.secretName" . }}
+                  key: {{ .Values.secretKeys.s3SecretAccessKey }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+{{- end }}

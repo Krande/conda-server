@@ -1,0 +1,240 @@
+# -- conda-server Helm chart values.
+# See deploy/helm/conda-server/README.md for an annotated walkthrough of
+# the install scenarios these knobs were designed for.
+
+# ---------------------------------------------------------------------
+# App image + replicas
+# ---------------------------------------------------------------------
+image:
+  repository: ghcr.io/krande/conda-server
+  # Override at install time; defaults to .Chart.AppVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Pull secrets for private registries — names of pre-created Secrets.
+imagePullSecrets: []
+
+# Number of API pods. Safe to scale once Postgres + S3 are externalised
+# (the bundled Postgres is single-pod, but the API itself is stateless).
+replicas: 1
+
+# ---------------------------------------------------------------------
+# App config
+# ---------------------------------------------------------------------
+app:
+  # External URL the app is reachable at. Used for OIDC redirect URIs
+  # and the "install instructions" snippets in the UI.
+  baseUrl: "http://localhost:8000"
+
+  # JSON-array of email addresses promoted to admin on first login.
+  initialAdmins: []
+
+  # Session cookie behaviour. Keep https=true unless you really are
+  # deploying over plain HTTP (dev only).
+  sessionHttpsOnly: true
+
+  # Per-file and per-request size caps for admin uploads.
+  uploadMaxFileBytes: 1073741824     # 1 GiB
+  uploadMaxTotalBytes: 4294967296    # 4 GiB
+
+  # ImportJob row TTL. Terminal (completed | failed) jobs older than
+  # this many days get deleted by the in-pod cleanup loop. Set to 0 to
+  # keep all rows forever (handy if you treat them as audit log).
+  cleanupImportJobTtlDays: 30
+  cleanupIntervalSeconds: 3600
+
+  # "json" for log-aggregator-friendly output, "console" for human dev.
+  logFormat: json
+
+  # OIDC discovery URL parent. Trailing slash matters if the IdP
+  # publishes endpoints with one (Authentik does).
+  oidc:
+    issuer: ""
+    scopes: ["openid", "email", "profile"]
+
+# ---------------------------------------------------------------------
+# Database
+#
+# Pick exactly one of the two paths:
+#   - postgresql.enabled=true: chart deploys a single-pod Postgres
+#     StatefulSet next to the app. Fine for dev/small ops; not HA.
+#   - external.url set:        bring your own Postgres. URL must use
+#     the asyncpg driver, e.g.
+#       postgresql+asyncpg://conda-server:secret@db.internal:5432/conda-server
+#     The password can either be inlined in the URL (less safe) or left
+#     out of the URL and supplied via secrets.values.dbPassword + a
+#     URL with $(DB_PASSWORD) substitution.
+# ---------------------------------------------------------------------
+postgresql:
+  enabled: false
+  image: postgres:16-alpine
+  storage:
+    size: 5Gi
+    storageClassName: ""
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+externalDatabase:
+  # Full SQLAlchemy URL. If the password lives in secrets.values
+  # (recommended), use the literal "$(DB_PASSWORD)" placeholder — the
+  # Deployment's env runs through K8s $(VAR) substitution.
+  url: ""
+
+# ---------------------------------------------------------------------
+# Object storage — required for production. Anything S3-compatible (AWS,
+# Garage, MinIO, Ceph, B2), Azure Blob, GCS, or local filesystem.
+# ---------------------------------------------------------------------
+storage:
+  backend: local                # local | s3 | azure | gcs
+  url: "/data"                  # path for local, s3://bucket for S3
+  endpoint: ""                  # Required for non-AWS S3 (e.g. https://garage-s3.example.com)
+  region: ""                    # us-east-1 is a safe self-hosted default
+  presignTtlSeconds: 900
+
+# ---------------------------------------------------------------------
+# Secrets
+#
+# By default the chart creates a Secret named {release}-secrets from the
+# values below. Set existingSecret to point at one you manage out-of-band
+# (Vault ExternalSecret, sealed-secrets, etc.) — same key names expected.
+# ---------------------------------------------------------------------
+secrets:
+  existingSecret: ""
+  # Plain string values; only consulted when existingSecret is unset.
+  # Generate sessionSecret with `openssl rand -hex 32`.
+  values:
+    sessionSecret: ""
+    oidcClientId: ""
+    oidcClientSecret: ""
+    dbPassword: ""              # Used by both bundled + external pg via $(VAR) substitution.
+    s3AccessKeyId: ""
+    s3SecretAccessKey: ""
+
+# Expected secret keys (only override if the existingSecret uses
+# different names than the chart defaults).
+secretKeys:
+  sessionSecret: session-secret
+  oidcClientId: oidc-client-id
+  oidcClientSecret: oidc-client-secret
+  dbPassword: db-password
+  s3AccessKeyId: s3-access-key-id
+  s3SecretAccessKey: s3-secret-access-key
+
+# ---------------------------------------------------------------------
+# Service + Ingress
+# ---------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: conda.example.com
+  tls:
+    # Standard cert-manager pattern:
+    # - hosts: [conda.example.com]
+    #   secretName: conda-server-tls
+
+# ---------------------------------------------------------------------
+# Resource requests + limits for the API pod.
+#
+# Memory note: the import-preview endpoint runs rattler.solve() which
+# pulls each selected platform's parsed repodata into memory (~500 MB
+# per platform for conda-forge). Multi-platform previews can spike to
+# 2+ GiB, so the limit here is set well above what the steady state
+# needs. Drop to 1Gi if you've disabled the import feature.
+# ---------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 3Gi
+
+# ---------------------------------------------------------------------
+# Pod-spec extras
+# ---------------------------------------------------------------------
+podAnnotations: {}
+hostAliases: []                   # [{ip, hostnames}]
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ---------------------------------------------------------------------
+# /metrics scrape — annotation-driven (Prometheus pod-discovery model).
+# Disable if you use ServiceMonitor + the prometheus-operator instead.
+# ---------------------------------------------------------------------
+metrics:
+  scrape: true
+
+# ---------------------------------------------------------------------
+# NetworkPolicy. Off by default — enable in clusters with default-deny.
+# ---------------------------------------------------------------------
+networkPolicy:
+  enabled: false
+  # Namespaces allowed to ingress to the API on the service port.
+  # Defaults to traefik (a common ingress namespace). Override for your setup.
+  ingressFromNamespaces:
+    - traefik
+
+# ---------------------------------------------------------------------
+# Migration Job — runs `alembic upgrade head` as a Helm pre-install/
+# pre-upgrade hook so the API pod doesn't crash-loop while the schema
+# is behind. Disable if you run alembic out of band.
+# ---------------------------------------------------------------------
+migrationJob:
+  enabled: true
+  backoffLimit: 3
+
+# ---------------------------------------------------------------------
+# S3 bucket CORS post-install Job. Required when the SPA is served from
+# a different origin than the S3 bucket — Garage / MinIO / Ceph etc.
+# default to no CORS rules, and the browser's "Show files" feature would
+# break without these. Skip for local-storage dev.
+# ---------------------------------------------------------------------
+bucketCors:
+  enabled: false
+  bucket: ""                      # Bucket name (without s3:// prefix).
+  endpoint: ""                    # https://your-s3-endpoint.example.com
+  region: us-east-1
+  allowedOrigin: ""               # https://conda.example.com (matches app.baseUrl)
+  # Image must already ship curl >= 7.75 (for --aws-sigv4); the Job runs as
+  # a non-root UID and cannot apk/apt-install at runtime. curlimages/curl
+  # fits and stays tiny. A plain alpine/debian image will NOT work here.
+  image: curlimages/curl:8.11.1
+
+# ---------------------------------------------------------------------
+# k8up backup wiring — gated on the cluster having the k8up CRDs.
+# ---------------------------------------------------------------------
+k8up:
+  enabled: false
+  # restic repo password Secret + REST credentials Secret. Names must
+  # match what the cluster's k8up operator expects (override to match
+  # your own naming convention).
+  repoPasswordSecret: k8up-backup-repo
+  restCredentialsSecret: k8up-rest-credentials
+  schedules:
+    backup: "15 3 * * *"
+    prune: "15 4 * * 0"
+    check: "15 5 1 * *"
+  retention:
+    keepLast: 7
+    keepDaily: 7
+    keepWeekly: 4
+    keepMonthly: 6
+    keepYearly: 2
+
+# ---------------------------------------------------------------------
+# Prometheus alert rules. Set to "PrometheusRule" if you have the
+# operator CRD installed; "ConfigMap" works with a hand-rolled
+# Prometheus that globs /etc/prometheus-rules/**/*.yml.
+# Off by default — enable explicitly to ship the alert set.
+# ---------------------------------------------------------------------
+metricsAlerts:
+  enabled: false
+  # PrometheusRule | ConfigMap
+  kind: PrometheusRule
