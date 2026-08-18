@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "conda-server-ci-tools"
+version = "0.1.0"
+description = "Local, unit-testable CI logic for conda-server (PR review + release tagging), replacing inline GitHub Actions Python."
+readme = "README.md"
+requires-python = ">=3.12"
+# semantic-release is invoked as a subprocess by the version/release helpers, so
+# installing this package puts it on PATH for the workflows.
+dependencies = ["python-semantic-release==8.5.1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+ci-tools = "ci_tools.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ci_tools"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# RUF001: the ℹ️/✅/❌ glyphs in the PR-comment strings are intentional.
+ignore = ["E501", "RUF001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

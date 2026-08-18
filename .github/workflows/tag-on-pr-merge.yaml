@@ -1,9 +1,26 @@
 name: Create Tag on PR Merge
 
+# Thin wrapper: the release decision + semantic-release invocation live in the
+# ci_tools package (ci_tools/, unit-tested via `pixi run test-ci`). On a merged
+# PR it reads the release-* label and, when a release is warranted, bumps the
+# version in pyproject.toml, creates a vX.Y.Z tag, pushes it, and cuts a GitHub
+# Release (all configured under [tool.semantic_release] in action_config.toml).
+#
+# CRITICAL — the tag is pushed over SSH with the SOURCE_KEY deploy key, NOT the
+# default GITHUB_TOKEN. A GITHUB_TOKEN-pushed tag does not trigger other
+# workflows; a deploy-key push does — so the new tag fires build-and-push.yaml
+# (on: push tags 'v*.*.*'). Wired via `remote.ignore_token_for_push = true`:
+# semantic-release pushes over the `origin` remote the checkout points at
+# SSH+SOURCE_KEY, and uses GH_TOKEN only for the Release API call.
+#
+# Requirements:
+#   * secrets.SOURCE_KEY — a deploy key with WRITE access to this repo.
+#   * Don't enable "Do not allow bypassing the above settings" in branch
+#     protection, or the deploy-key push is rejected.
+
 on:
   pull_request_target:
-    branches:
-      - main
+    branches: [main]
     types: [closed]
 
 permissions:
@@ -16,8 +33,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  release_if_ok:
+  tag:
+    name: Tag release
     if: github.event.pull_request.merged == true
-    uses: AibelDevs/action-toolbox/.github/workflows/tool-generate-semantic-version.yaml@main
-    secrets:
-      SOURCE_KEY: ${{ secrets.SOURCE_KEY }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (full history; deploy-key auth so the tag push triggers CI)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}   # base branch (main) — merge is already in
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure git identity for the release commit
+        run: |
+          git config user.name "semantic-release"
+          git config user.email "semantic-release@users.noreply.github.com"
+
+      - name: Install ci_tools
+        run: pip install ./ci_tools
+
+      - name: Tag + release per the PR's release label
+        run: python -m ci_tools.cli tag-on-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
