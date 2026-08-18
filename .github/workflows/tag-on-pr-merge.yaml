@@ -1,9 +1,30 @@
 name: Create Tag on PR Merge
 
+# Self-contained release tagger — no dependency on any external reusable
+# workflow. When a PR is merged into main it reads the PR's release-* label
+# (pr-review.yaml enforces exactly one and defaults to release-skip), and if a
+# release is warranted it runs python-semantic-release to bump the version in
+# pyproject.toml, commit it, create a vX.Y.Z tag, push it, and cut a GitHub
+# Release. All of that behaviour is configured in action_config.toml under
+# [tool.semantic_release].
+#
+# CRITICAL — the tag is pushed over SSH using the SOURCE_KEY deploy key, NOT the
+# default GITHUB_TOKEN. A tag pushed with GITHUB_TOKEN does not trigger other
+# workflows; a tag pushed with a deploy key does. That is what lets the new
+# vX.Y.Z tag fire build-and-push.yaml (on: push tags 'v*.*.*') to publish the
+# image. This is wired via `remote.ignore_token_for_push = true` in
+# action_config.toml: semantic-release pushes over the `origin` remote that the
+# checkout step below points at SSH+SOURCE_KEY, and uses GH_TOKEN only for the
+# GitHub Release API call.
+#
+# Requirements:
+#   * secrets.SOURCE_KEY — a deploy key with WRITE access to this repo.
+#   * Do NOT enable "Do not allow bypassing the above settings" in branch
+#     protection, or the deploy-key push is rejected.
+
 on:
   pull_request_target:
-    branches:
-      - main
+    branches: [main]
     types: [closed]
 
 permissions:
@@ -16,8 +37,70 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  release_if_ok:
+  tag:
+    name: Tag release
     if: github.event.pull_request.merged == true
-    uses: AibelDevs/action-toolbox/.github/workflows/tool-generate-semantic-version.yaml@main
-    secrets:
-      SOURCE_KEY: ${{ secrets.SOURCE_KEY }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide release bump from the PR's release-* label
+        id: decide
+        shell: python
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          import json
+          import os
+
+          labels = json.loads(os.environ["LABELS"])
+          # Maps each release label to the semantic-release force flag.
+          # release-auto -> "" lets semantic-release pick the bump from the
+          # conventional-commit history; release-skip -> no release at all.
+          force = {
+              "release-skip": None,
+              "release-auto": "",
+              "release-patch": "--patch",
+              "release-minor": "--minor",
+              "release-major": "--major",
+          }
+          present = [l for l in labels if l in force] or ["release-skip"]
+
+          if len(present) != 1 or present[0] == "release-skip":
+              release, flag = "false", ""
+          else:
+              release, flag = "true", force[present[0]]
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"release={release}\n")
+              fh.write(f"flag={flag}\n")
+          print(f"labels={labels} -> release={release} flag={flag!r}")
+
+      - name: Checkout main (full history; deploy-key auth so the tag push triggers CI)
+        if: steps.decide.outputs.release == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}   # base branch (main) — merge is already in
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+
+      - name: Set up Python
+        if: steps.decide.outputs.release == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install python-semantic-release
+        if: steps.decide.outputs.release == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install "python-semantic-release==8.5.1"
+
+      - name: Bump version, tag, push, and create the GitHub Release
+        if: steps.decide.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "semantic-release"
+          git config user.email "semantic-release@users.noreply.github.com"
+          # flag is one of "", --patch, --minor, --major (fixed set from the
+          # step above — not free-form input), so this is injection-safe.
+          semantic-release --config action_config.toml version ${{ steps.decide.outputs.flag }} --changelog --vcs-release
