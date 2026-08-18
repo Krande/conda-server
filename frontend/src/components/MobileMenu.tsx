@@ -5,6 +5,7 @@ import { Button } from "./ui/Button";
 import { ThemeToggle } from "./ThemeToggle";
 import { cn } from "@/lib/cn";
 import { loginRedirectUrl, useCurrentUser, useLogout } from "@/lib/auth";
+import { PALETTES, usePalette } from "@/lib/theme";
 
 /**
  * Full-height sheet that slides in from the right on narrow viewports.
@@ -20,6 +21,7 @@ export function MobileMenu({
   const { user, isLoggedIn, isAdmin } = useCurrentUser();
   const logout = useLogout();
   const location = useLocation();
+  const { palette, setPalette } = usePalette();
 
   // Close on ESC and on navigation.
   useEffect(() => {
@@ -102,6 +104,32 @@ export function MobileMenu({
             </>
           )}
         </nav>
+
+        <div className="mt-2 border-t border-slate-200 px-4 py-3 dark:border-slate-800">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+            Theme
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {PALETTES.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setPalette(p.id)}
+                aria-label={p.label}
+                aria-pressed={palette === p.id}
+                title={p.label}
+                className={cn(
+                  "size-8 cursor-pointer rounded-full ring-1 ring-inset ring-black/10 transition dark:ring-white/10",
+                  palette === p.id &&
+                    "ring-2 ring-offset-2 ring-brand-500 ring-offset-white dark:ring-offset-slate-900",
+                )}
+                style={{
+                  background: `linear-gradient(135deg, ${p.swatch[0]} 50%, ${p.swatch[1]} 50%)`,
+                }}
+              />
+            ))}
+          </div>
+        </div>
 
         <div className="mt-auto border-t border-slate-200 p-3 dark:border-slate-800">
           {isLoggedIn ? (
