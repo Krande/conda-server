@@ -2,6 +2,67 @@
 
 
 
+## v0.1.0 (2026-08-18)
+
+### Chore
+
+* chore(frontend): add ESLint 9 flat config so the lint task runs
+
+The lint npm script referenced ESLint 9 but no eslint.config.js was ever
+committed, so `npm run lint` errored out. Add a flat config wiring the
+already-installed typescript-eslint, react-hooks, and react-refresh plugins.
+Lints clean across the frontend.
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt; ([`1d6453c`](https://github.com/Krande/conda-server/commit/1d6453cfda8460ecdc729e5ab526c2ece1b10b1f))
+
+### Feature
+
+* feat(frontend): redesign pages + admin Add-channel on Channels
+
+Apply the refreshed visual language across the pages and expose channel
+creation where it&#39;s actually needed.
+
+- InstallInstructions: render install commands as a faux terminal (accent
+  prompt, dimmed flags, per-manager rows, inline copy) — the block users copy
+- Channels: admin-only &#34;Add channel&#34; button reveals an inline create panel,
+  so admins no longer have to detour through /admin
+- CreateChannelForm: extract the create-channel form into one shared component
+  used by both the Channels page and the Admin dashboard
+- Home: gradient hero + search + stats row + terminal quick-install
+- ChannelDetail / PackageDetail / Tokens: refined headers, pills, notices, and
+  real semantic tables (scrollable, tabular-nums, mono cells)
+- Card: softer radius
+
+All accents route through the CSS-variable-backed brand-* ramp, so every page
+recolors with the active palette.
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt; ([`f8ffe19`](https://github.com/Krande/conda-server/commit/f8ffe1954b732310b9697555b2ae4bc0d95e6ee4))
+
+* feat(frontend): palette-aware theming foundation + refreshed chrome
+
+Add a runtime accent-palette system on top of the existing light/dark
+theme. The brand-* Tailwind ramp is now CSS-variable-backed (--brand-*
+channels per palette in index.css) and swapped via a data-palette
+attribute on &lt;html&gt;, so every brand-* utility recolors app-wide with no
+per-component changes. Six palettes ship (amber default, emerald, indigo,
+ocean, rose, graphite); the choice persists in localStorage and is applied
+pre-paint by the boot script to avoid a flash.
+
+- theme.ts: add Palette type, PALETTES, usePalette hook, boot snippet
+- SettingsMenu: gear dropdown with appearance + theme palette picker
+- MobileMenu: palette swatches for narrow viewports
+- Layout: sticky blurred header, display-font brand, cube BrandMark
+- Fonts: Space Grotesk (display) + IBM Plex Sans/Mono
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt; ([`4f25140`](https://github.com/Krande/conda-server/commit/4f25140d623c19dc81820a62470304d3d2f936d7))
+
+### Unknown
+
+* Merge pull request #2 from Krande/feat/ui-redesign
+
+feat: redesign web UI with switchable accent palettes ([`e8be6dc`](https://github.com/Krande/conda-server/commit/e8be6dce91fed51d25b96070666b8bc3381d0e72))
+
+
 ## v0.0.1 (2026-08-18)
 
 ### Fix
