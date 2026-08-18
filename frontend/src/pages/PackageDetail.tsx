@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/Button";
-import { Card, CardBody, CardHeader } from "@/components/ui/Card";
+import { Card } from "@/components/ui/Card";
 import { EmptyState, ErrorState } from "@/components/ui/EmptyState";
 import { Input } from "@/components/ui/Input";
 import { PageSpinner } from "@/components/ui/Spinner";
@@ -112,87 +112,100 @@ export default function PackageDetail() {
         {data.versions.length === 0 ? (
           <EmptyState title="No versions indexed yet" />
         ) : (
-          <Card>
-            <CardHeader className="hidden grid-cols-12 gap-4 text-xs font-medium uppercase tracking-wide text-slate-500 sm:grid dark:text-slate-400">
-              <div className="col-span-2">Version</div>
-              <div className="col-span-2">Build</div>
-              <div className="col-span-2">Subdir</div>
-              <div className="col-span-2">Size</div>
-              <div className={canDelete ? "col-span-3 text-right" : "col-span-4 text-right"}>
-                Download
-              </div>
-              {canDelete && <div className="col-span-1 text-right">Action</div>}
-            </CardHeader>
-            <CardBody className="divide-y divide-slate-100 p-0 dark:divide-slate-800">
-              {data.versions.map((v) => {
-                const key = `${v.subdir}-${v.filename}`;
-                const isOpen = !!expanded[key];
-                return (
-                  <div key={key}>
-                    <div className="px-4 py-3 text-sm sm:grid sm:grid-cols-12 sm:gap-4 sm:px-5">
-                      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 sm:contents">
-                        <button
-                          type="button"
-                          onClick={() => toggle(key)}
-                          className="flex items-baseline gap-2 font-medium text-slate-900 hover:text-brand-700 sm:col-span-2 sm:cursor-pointer dark:text-slate-100 dark:hover:text-brand-400"
-                          aria-expanded={isOpen}
-                          aria-label={`${isOpen ? "Collapse" : "Expand"} details for ${v.version}`}
+          <Card className="overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[640px] border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                    <th className="px-5 py-3 font-medium">Version</th>
+                    <th className="px-5 py-3 font-medium">Build</th>
+                    <th className="px-5 py-3 font-medium">Subdir</th>
+                    <th className="px-5 py-3 text-right font-medium">Size</th>
+                    <th className="px-5 py-3 font-medium">Download</th>
+                    {canDelete && <th className="px-5 py-3 text-right font-medium">Action</th>}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {data.versions.map((v) => {
+                    const key = `${v.subdir}-${v.filename}`;
+                    const isOpen = !!expanded[key];
+                    const colSpan = canDelete ? 6 : 5;
+                    return (
+                      <Fragment key={key}>
+                        <tr
+                          className={`transition-colors ${
+                            isOpen
+                              ? "bg-slate-50 dark:bg-slate-800/40"
+                              : "hover:bg-slate-50 dark:hover:bg-slate-800/40"
+                          }`}
                         >
-                          <span
-                            aria-hidden
-                            className={`inline-block text-xs text-slate-400 transition-transform dark:text-slate-500 ${
-                              isOpen ? "rotate-90" : ""
-                            }`}
-                          >
-                            ▸
-                          </span>
-                          {v.version}
-                        </button>
-                        <span className="font-mono text-xs text-slate-600 sm:col-span-2 sm:truncate sm:self-baseline dark:text-slate-400">
-                          {v.build}
-                        </span>
-                        <span className="text-slate-700 sm:col-span-2 sm:self-baseline dark:text-slate-300">
-                          {v.subdir}
-                        </span>
-                        <span className="tabular-nums text-slate-600 sm:col-span-2 sm:self-baseline sm:text-slate-700 dark:text-slate-400 dark:sm:text-slate-300">
-                          {formatSize(v.size)}
-                        </span>
-                      </div>
-                      <div
-                        className={`mt-1 sm:mt-0 sm:text-right ${
-                          canDelete ? "sm:col-span-3" : "sm:col-span-4"
-                        }`}
-                      >
-                        <a
-                          href={packageDownloadUrl(channel, v.subdir, v.filename)}
-                          className="block truncate text-xs text-brand-700 hover:underline dark:text-brand-400"
-                          title={v.filename}
-                        >
-                          {v.filename}
-                        </a>
-                      </div>
-                      {canDelete && (
-                        <div className="mt-2 sm:col-span-1 sm:mt-0 sm:text-right">
-                          <Button
-                            variant="danger"
-                            size="sm"
-                            onClick={() => handleDelete(v.subdir, v.filename)}
-                            loading={
-                              del.isPending &&
-                              del.variables?.subdir === v.subdir &&
-                              del.variables?.filename === v.filename
-                            }
-                          >
-                            Delete
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                    {isOpen && <VersionDetails v={v} channel={channel} />}
-                  </div>
-                );
-              })}
-            </CardBody>
+                          <td className="px-5 py-3 align-baseline">
+                            <button
+                              type="button"
+                              onClick={() => toggle(key)}
+                              className="flex cursor-pointer items-baseline gap-2 font-mono font-medium text-slate-900 hover:text-brand-700 dark:text-slate-100 dark:hover:text-brand-400"
+                              aria-expanded={isOpen}
+                              aria-label={`${isOpen ? "Collapse" : "Expand"} details for ${v.version}`}
+                            >
+                              <span
+                                aria-hidden
+                                className={`inline-block text-xs text-slate-400 transition-transform dark:text-slate-500 ${
+                                  isOpen ? "rotate-90" : ""
+                                }`}
+                              >
+                                ▸
+                              </span>
+                              {v.version}
+                            </button>
+                          </td>
+                          <td className="px-5 py-3 align-baseline font-mono text-xs text-slate-600 dark:text-slate-400">
+                            {v.build}
+                          </td>
+                          <td className="px-5 py-3 align-baseline text-slate-700 dark:text-slate-300">
+                            {v.subdir}
+                          </td>
+                          <td className="px-5 py-3 align-baseline text-right tabular-nums text-slate-600 dark:text-slate-400">
+                            {formatSize(v.size)}
+                          </td>
+                          <td className="px-5 py-3 align-baseline">
+                            <a
+                              href={packageDownloadUrl(channel, v.subdir, v.filename)}
+                              className="inline-block max-w-[260px] truncate align-bottom font-mono text-xs text-brand-700 hover:underline dark:text-brand-400"
+                              title={v.filename}
+                            >
+                              {v.filename}
+                            </a>
+                          </td>
+                          {canDelete && (
+                            <td className="px-5 py-3 text-right align-baseline">
+                              <Button
+                                variant="danger"
+                                size="sm"
+                                onClick={() => handleDelete(v.subdir, v.filename)}
+                                loading={
+                                  del.isPending &&
+                                  del.variables?.subdir === v.subdir &&
+                                  del.variables?.filename === v.filename
+                                }
+                              >
+                                Delete
+                              </Button>
+                            </td>
+                          )}
+                        </tr>
+                        {isOpen && (
+                          <tr>
+                            <td colSpan={colSpan} className="p-0">
+                              <VersionDetails v={v} channel={channel} />
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </Card>
         )}
       </section>
@@ -217,7 +230,7 @@ function VersionDetails({ v, channel }: { v: PackageVersion; channel: string }) 
   const resolved = resolveQ.data ?? {};
 
   return (
-    <div className="border-t border-slate-100 bg-slate-50 px-4 py-4 text-sm sm:px-5 dark:border-slate-800 dark:bg-slate-900/40">
+    <div className="border-t border-slate-200 bg-slate-50 px-5 py-5 text-sm dark:border-slate-800 dark:bg-slate-900/40">
       <div className="grid gap-6 md:grid-cols-2">
         <DepList
           title={`Depends (${depends.length})`}
@@ -472,7 +485,7 @@ function DepList({
       {items.length === 0 ? (
         <p className="text-xs text-slate-500 dark:text-slate-400">{emptyText}</p>
       ) : (
-        <ul className="space-y-1">
+        <ul className="flex flex-wrap gap-x-4 gap-y-2">
           {items.map((spec) => {
             const { name, constraint } = parseDepSpec(spec);
             const local = resolved[name];
@@ -481,7 +494,7 @@ function DepList({
               : condaForgeUrl(name);
             const isLocal = !!local;
             return (
-              <li key={spec} className="flex flex-wrap items-baseline gap-2 text-xs">
+              <li key={spec} className="flex items-baseline gap-1.5 text-xs">
                 <a
                   href={href}
                   target={isLocal ? undefined : "_blank"}
