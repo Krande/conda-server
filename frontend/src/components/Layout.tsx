@@ -3,6 +3,8 @@ import { Link, NavLink, Outlet } from "react-router-dom";
 import { UserMenu } from "./UserMenu";
 import { MobileMenu } from "./MobileMenu";
 import { ThemeToggle } from "./ThemeToggle";
+import { SettingsMenu } from "./SettingsMenu";
+import { BrandMark } from "./BrandMark";
 import { cn } from "@/lib/cn";
 
 function NavItem({ to, label }: { to: string; label: string }) {
@@ -29,13 +31,13 @@ export default function Layout() {
 
   return (
     <div className="flex min-h-full flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-      <header className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/85 backdrop-blur-md backdrop-saturate-150 dark:border-slate-800 dark:bg-slate-900/80">
         <div className="mx-auto flex max-w-6xl items-center gap-4 px-4 py-3 sm:px-6">
           <Link
             to="/"
-            className="flex items-center gap-2 font-semibold text-slate-900 dark:text-slate-100"
+            className="flex items-center gap-2 font-display text-base font-semibold tracking-tight text-slate-900 dark:text-slate-100"
           >
-            <img src="/favicon.svg" alt="" className="size-6" />
+            <BrandMark className="size-6 text-brand-600 dark:text-brand-400" />
             <span>conda-server</span>
           </Link>
 
@@ -45,9 +47,10 @@ export default function Layout() {
             <NavItem to="/channels" label="Channels" />
           </nav>
 
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-1">
             <ThemeToggle className="hidden sm:inline-flex" />
-            <div className="hidden sm:block">
+            <SettingsMenu className="hidden sm:inline-flex" />
+            <div className="ml-1 hidden sm:block">
               <UserMenu />
             </div>
             <button
@@ -68,17 +71,20 @@ export default function Layout() {
       </main>
 
       <footer className="border-t border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
-        <div className="mx-auto max-w-6xl px-4 py-4 text-center text-xs text-slate-500 dark:text-slate-400 sm:px-6">
-          conda-server — open source on the{" "}
-          <a
-            href="https://github.com/conda/rattler"
-            className="text-brand-700 hover:underline dark:text-brand-400"
-            target="_blank"
-            rel="noreferrer"
-          >
-            rattler
-          </a>{" "}
-          ecosystem
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-center gap-2 px-4 py-4 text-center text-xs text-slate-500 dark:text-slate-400 sm:px-6">
+          <BrandMark className="size-4 text-brand-600 dark:text-brand-400" />
+          <span>
+            conda-server — open source on the{" "}
+            <a
+              href="https://github.com/conda/rattler"
+              className="text-brand-700 hover:underline dark:text-brand-400"
+              target="_blank"
+              rel="noreferrer"
+            >
+              rattler
+            </a>{" "}
+            ecosystem
+          </span>
         </div>
       </footer>
     </div>

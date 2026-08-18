@@ -1,14 +1,20 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Input } from "@/components/ui/Input";
-import { Card, CardBody } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
+import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { EmptyState, ErrorState } from "@/components/ui/EmptyState";
 import { PageSpinner } from "@/components/ui/Spinner";
+import { CreateChannelForm } from "@/components/CreateChannelForm";
 import { useChannels } from "@/lib/queries";
+import { useCurrentUser } from "@/lib/auth";
 
 export default function Channels() {
   const [filter, setFilter] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
   const { data, isLoading, error } = useChannels();
+  const { isAdmin } = useCurrentUser();
+  const navigate = useNavigate();
 
   if (isLoading) return <PageSpinner />;
   if (error) return <ErrorState error={error} />;
@@ -24,16 +30,48 @@ export default function Channels() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold tracking-tight">Channels</h1>
-        <div className="w-80 max-w-full">
-          <Input
-            placeholder="Filter channels…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          />
+        <div className="flex items-center gap-2">
+          <div className="w-60 max-w-full">
+            <Input
+              placeholder="Filter channels…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+          </div>
+          {isAdmin && (
+            <Button
+              onClick={() => setShowCreate((v) => !v)}
+              aria-expanded={showCreate}
+              className="shrink-0"
+            >
+              <PlusIcon />
+              Add channel
+            </Button>
+          )}
         </div>
       </div>
+
+      {isAdmin && showCreate && (
+        <Card>
+          <CardHeader className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold">New channel</h2>
+            <span className="rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-brand-800 dark:bg-brand-500/15 dark:text-brand-200">
+              admin only
+            </span>
+          </CardHeader>
+          <CardBody>
+            <CreateChannelForm
+              onCreated={(channelName) => {
+                setShowCreate(false);
+                navigate(`/channels/${channelName}`);
+              }}
+              onCancel={() => setShowCreate(false)}
+            />
+          </CardBody>
+        </Card>
+      )}
 
       {channels.length === 0 ? (
         <EmptyState
@@ -41,7 +79,9 @@ export default function Channels() {
           description={
             filter
               ? "Try a different search term."
-              : "Create a channel via the API or CLI to get started."
+              : isAdmin
+                ? "Use “Add channel” above to create your first one."
+                : "Create a channel via the API or CLI to get started."
           }
         />
       ) : (
@@ -68,7 +108,7 @@ export default function Channels() {
                       {channel.description || "No description."}
                     </p>
                   </div>
-                  <code className="hidden shrink-0 text-xs text-slate-500 sm:block dark:text-slate-400">
+                  <code className="hidden shrink-0 font-mono text-xs text-slate-500 sm:block dark:text-slate-400">
                     {channel.storage_prefix}
                   </code>
                 </CardBody>
@@ -78,5 +118,13 @@ export default function Channels() {
         </div>
       )}
     </div>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
   );
 }

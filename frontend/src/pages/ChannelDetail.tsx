@@ -28,21 +28,24 @@ export default function ChannelDetail() {
   );
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-10">
       <div>
-        <Link to="/channels" className="text-sm text-brand-700 hover:underline dark:text-brand-400">
+        <Link
+          to="/channels"
+          className="text-sm font-medium text-brand-700 hover:underline dark:text-brand-400"
+        >
           ← Back to channels
         </Link>
-        <div className="mt-2 flex flex-wrap items-center gap-2">
+        <div className="mt-3 flex flex-wrap items-center gap-2.5">
           <h1 className="text-2xl font-semibold tracking-tight">{channel.name}</h1>
           {channel.private && (
-            <span className="rounded bg-slate-900 px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-slate-100 dark:bg-slate-700">
+            <span className="inline-flex items-center rounded-md bg-slate-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white dark:bg-slate-800 dark:text-slate-300 dark:ring-1 dark:ring-inset dark:ring-slate-700">
               private
             </span>
           )}
           {channel.mirror_url && (
             <span
-              className="rounded bg-brand-100 px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-brand-800 dark:bg-brand-500/15 dark:text-brand-200"
+              className="inline-flex items-center rounded-md bg-brand-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-400"
               title={`Upstream: ${channel.mirror_url}`}
             >
               mirror
@@ -50,14 +53,18 @@ export default function ChannelDetail() {
           )}
         </div>
         {channel.description && (
-          <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">{channel.description}</p>
+          <p className="mt-2 max-w-2xl text-sm text-slate-600 dark:text-slate-400">
+            {channel.description}
+          </p>
         )}
         {channel.mirror_url && (
-          <div className="mt-3 rounded-md border border-brand-200 bg-brand-50 px-3 py-2 text-xs text-brand-900 dark:border-brand-700/60 dark:bg-brand-500/10 dark:text-brand-200">
+          <div className="mt-4 rounded-lg border border-brand-500/30 bg-brand-500/5 px-4 py-3 text-sm text-brand-900 dark:border-brand-500/25 dark:bg-brand-500/10 dark:text-brand-200">
             Proxying{" "}
-            <code className="font-mono">{channel.mirror_url}</code>. Packages appear
-            below as clients pull them through this server; repodata refreshes
-            every {channel.mirror_cache_seconds}s.
+            <code className="rounded bg-brand-500/10 px-1.5 py-0.5 font-mono text-xs dark:bg-brand-500/15">
+              {channel.mirror_url}
+            </code>
+            . Packages appear below as clients pull them through this server;
+            repodata refreshes every {channel.mirror_cache_seconds}s.
           </div>
         )}
       </div>
@@ -76,8 +83,17 @@ export default function ChannelDetail() {
       <ImportFromUpstreamCard channel={channel} />
 
       <section>
-        <div className="mb-4 flex items-center justify-between gap-4">
-          <h2 className="text-lg font-semibold">Packages</h2>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
+          <h2 className="text-lg font-semibold">
+            Packages
+            {packagesQ.data && (
+              <span className="ml-2 text-sm font-normal text-slate-500 dark:text-slate-400">
+                {filter
+                  ? `${pkgs.length} of ${packagesQ.data.length}`
+                  : packagesQ.data.length}
+              </span>
+            )}
+          </h2>
           <div className="w-64 max-w-full">
             <Input
               placeholder="Filter packages…"
