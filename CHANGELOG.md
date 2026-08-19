@@ -2,6 +2,37 @@
 
 
 
+## v0.2.0 (2026-08-19)
+
+### Feature
+
+* feat(frontend): amber favicon + restructured channel page
+
+The UI redesign switched the default brand palette to amber and the logo
+to an isometric package cube, but favicon.svg was left as the old emerald
+hexagon. Redraw it as the amber cube so the browser tab matches the app.
+
+Restructure the channel page around the day-to-day need:
+  - Packages overview leads the page.
+  - Upload / Import stay visible (writer+ contributor actions).
+  - Reindex / delete + member management move into a new collapsible
+    &#34;Channel administration&#34; section, collapsed by default.
+  - Install instructions anchor the bottom as scroll-to reference.
+
+Add a small CollapsibleSection UI primitive (chevron + aria-expanded,
+mirrors the &#34;Add channel&#34; disclosure). Its body is unmounted while
+collapsed, so the member-list query only fires once opened.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01J3zfaYytWJnEeZrNGo3aup ([`b518b19`](https://github.com/Krande/conda-server/commit/b518b196ff8391c25844aa1ba21510b5a8ecf83f))
+
+### Unknown
+
+* Merge pull request #3 from Krande/feat/channel-page-facelift
+
+feat: amber favicon + restructured channel page ([`de669e6`](https://github.com/Krande/conda-server/commit/de669e61bac55a1b0a822e1518562dc06e7e0584))
+
+
 ## v0.1.0 (2026-08-18)
 
 ### Chore
