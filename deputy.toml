@@ -1,0 +1,17 @@
+# deputy CI config — https://github.com/Krande/deputy
+#
+# The pr-review / tag-on-merge workflows install deputy and call it; the static
+# config lives here so the workflows stay thin. Release behaviour defaults to
+# deputy's built-in semantic-release config (tag "v{version}", angular parser,
+# main branch, push over origin, upload to the VCS release), so only the
+# repo-specific bits are set below — no action_config.toml needed for releases.
+
+[pr_review]
+# Keep updating conda-server's original sticky comment (pre-deputy marker)
+# instead of orphaning it under deputy's default marker.
+marker = "<!-- CONDA_SERVER_PR_BOT -->"
+
+[release]
+# The version lives in pyproject.toml (this matches deputy's default; kept
+# explicit as the one release knob this repo actually pins).
+version_toml = ["pyproject.toml:project.version"]
