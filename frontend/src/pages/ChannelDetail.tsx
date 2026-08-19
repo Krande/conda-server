@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/Input";
 import { EmptyState, ErrorState } from "@/components/ui/EmptyState";
 import { PageSpinner } from "@/components/ui/Spinner";
 import { InstallInstructions } from "@/components/InstallInstructions";
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import { ChannelAdminCard } from "@/components/ChannelAdminCard";
 import { ChannelMembersCard } from "@/components/ChannelMembersCard";
 import { ImportFromUpstreamCard } from "@/components/ImportFromUpstreamCard";
@@ -69,19 +70,8 @@ export default function ChannelDetail() {
         )}
       </div>
 
-      <section>
-        <h2 className="mb-3 text-lg font-semibold">Install from this channel</h2>
-        <InstallInstructions channel={channel.name} />
-      </section>
-
-      <ChannelAdminCard channel={channel} />
-
-      {canManage && <ChannelMembersCard channel={channel} />}
-
-      <UploadPackageCard channel={channel} />
-
-      <ImportFromUpstreamCard channel={channel} />
-
+      {/* Packages overview — the day-to-day reason to open a channel, so it
+          leads the page. */}
       <section>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
           <h2 className="text-lg font-semibold">
@@ -122,13 +112,38 @@ export default function ChannelDetail() {
                 : channel.mirror_url
                   ? "Packages appear here the first time a client pulls them through this server."
                   : canManage
-                    ? "Upload a .conda or .tar.bz2 archive via the card above; it's indexed automatically."
+                    ? "Upload a .conda or .tar.bz2 archive via the card below; it's indexed automatically."
                     : "An owner or writer can upload packages to this channel."
             }
           />
         ) : (
           <PackageList channelName={channel.name} packages={pkgs} />
         )}
+      </section>
+
+      {/* Contributor actions — visible to writers+, so they stay out in the
+          open rather than behind the admin disclosure. Both self-hide for
+          mirror channels and for readers. */}
+      <UploadPackageCard channel={channel} />
+
+      <ImportFromUpstreamCard channel={channel} />
+
+      {/* Owner/admin surface, collapsed by default to keep the page calm. */}
+      {canManage && (
+        <CollapsibleSection
+          title="Channel administration"
+          description="Reindex or delete this channel and manage who can access it — owner & admin only."
+        >
+          <ChannelAdminCard channel={channel} />
+          <ChannelMembersCard channel={channel} />
+        </CollapsibleSection>
+      )}
+
+      {/* Install instructions are reference you scroll to, so they anchor the
+          bottom rather than pushing the package list down. */}
+      <section>
+        <h2 className="mb-3 text-lg font-semibold">Install from this channel</h2>
+        <InstallInstructions channel={channel.name} />
       </section>
     </div>
   );
