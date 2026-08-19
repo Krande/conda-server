@@ -63,7 +63,7 @@ python = "3.12.*"
 ruff = "==0.16.3"
 
 [feature.lint.tasks]
-lint = { cmd = "ruff format --check src tests ci_tools && ruff check src tests ci_tools", description = "Check formatting + lint with the CI-pinned ruff" }
+lint = { cmd = "ruff format --check src tests && ruff check src tests", description = "Check formatting + lint with the CI-pinned ruff" }
 
 [feature.prod.tasks]
 serve = { cmd = "uvicorn conda_server.app:create_app --factory --host 0.0.0.0 --port 8000 --reload", description = "Run the API server (dev mode with reload)" }
@@ -73,8 +73,7 @@ reindex = { cmd = "conda-server reindex", description = "Reindex a channel from 
 
 [feature.dev.tasks]
 test = { cmd = "pytest -q", description = "Run the test suite" }
-test-ci = { cmd = "pytest ci_tools/tests -q", description = "Run the ci_tools (CI logic) unit tests" }
-format = { cmd = "ruff format src tests ci_tools", description = "Format the codebase" }
+format = { cmd = "ruff format src tests", description = "Format the codebase" }
 typecheck = { cmd = "mypy src", description = "Type-check the codebase" }
 frontend-install = { cmd = "npm install", cwd = "frontend", description = "Install frontend deps" }
 frontend-dev = { cmd = "npm run dev", cwd = "frontend", description = "Run Vite dev server (proxies /api to backend on :8000)" }
