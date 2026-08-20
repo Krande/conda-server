@@ -81,7 +81,7 @@ jobs:
           # python image — the runner has Docker. python:3.12 ships pip + git.
           docker run --rm \
             -e FORGEJO_HOST -e GITOPS_TOKEN -e GITOPS_REPO -e GITOPS_MANIFEST \
-            -e GITOPS_IMAGE_PATHS -e CI_EMAIL -e REGISTRY_IMAGE -e TAG \
+            -e GITOPS_IMAGE_PATHS -e CI_EMAIL -e REGISTRY_IMAGE -e TAG="$TAG" \
             python:3.12 bash -euo pipefail -c '
               pip install --quiet "deputy @ git+https://github.com/Krande/deputy.git@v0.2.0"
               git config --global --add safe.directory "*"
