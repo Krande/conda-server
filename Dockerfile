@@ -5,6 +5,12 @@ FROM node:22-alpine AS frontend
 WORKDIR /fe
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN --mount=type=cache,target=/root/.npm npm ci
+# Bust the frontend build cache per commit. The CI runs docker in a persistent
+# DinD whose BuildKit has been observed to reuse this stage's COPY/build layers
+# across commits even when frontend/ changed — shipping a stale dist/ under a
+# fresh image tag. Tying the layer to GIT_SHA forces `npm run build` to re-run
+# for every commit; `npm ci` above stays cached (deps rarely change).
+ARG GIT_SHA=dev
 COPY frontend ./
 RUN npm run build
 
