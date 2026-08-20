@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conda-server"
-version = "0.3.0"
+version = "0.4.0"
 description = "A modern, open-source conda package server built on the rattler ecosystem"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -2,6 +2,57 @@
 
 
 
+## v0.4.0 (2026-08-20)
+
+### Feature
+
+* feat: actionable CORS hint when browser &#34;Show files&#34; fetch is blocked
+
+The &#34;Show files&#34; view downloads a .conda in the browser and unpacks it
+client-side. The download endpoint 302-redirects that fetch to a
+cross-origin presigned storage URL (S3 / Azure Blob / GCS); without a
+CORS rule allowing the site origin, the browser blocks the response and
+fetch throws an opaque TypeError. Previously this surfaced as a bare
+&#34;Failed to fetch&#34; with no path forward.
+
+- condaFiles.ts: wrap the fetch in a typed CondaFilesFetchError that
+  distinguishes network/CORS failures (kind: &#34;network&#34;) from HTTP
+  errors, plus an isNetworkFetchError helper.
+- PackageDetail.tsx: on a network-kind failure, render an amber hint
+  naming the site origin, the (backend-specific) CORS remedy, and a link
+  to the docs, with a retry. Falls back to a generic cloud-storage hint
+  when the backend is unknown, and to a plain network error for the
+  local backend (same-origin, so CORS can&#39;t be the cause).
+- Backend-aware: /about now returns storage_backend (read-only,
+  non-sensitive); the SPA fetches it lazily (only on error, cached and
+  shared with the About page) to tailor the hint per S3/Azure/GCS.
+- docs/deploying.md: add a &#34;Troubleshooting: browser file listing
+  (CORS)&#34; section (the hint&#39;s link target) covering the per-backend fix,
+  adding GCS alongside the existing S3/Azure guidance.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01J3zfaYytWJnEeZrNGo3aup ([`fac6ce9`](https://github.com/Krande/conda-server/commit/fac6ce9bcea57dbd971ebfdc299da52b417fc0dc))
+
+### Unknown
+
+* Merge pull request #10 from Krande/feat/cors-file-listing-hint
+
+feat: actionable CORS hint when browser &#34;Show files&#34; fetch is blocked ([`ac9675e`](https://github.com/Krande/conda-server/commit/ac9675e9660605e1ced8933caaf9a4e8a20a23eb))
+
+* Merge branch &#39;main&#39; into feat/cors-file-listing-hint ([`2d43017`](https://github.com/Krande/conda-server/commit/2d4301717680a82d104fb56f97484ddf0cf0edc2))
+
+* Merge pull request #9 from Krande/ci/bump-deputy-v0.3.0
+
+chore: bump deputy pin v0.2.0 -&gt; v0.3.0 ([`d5d3327`](https://github.com/Krande/conda-server/commit/d5d3327786f2f02a352422fc88c45ca4adadfcc9))
+
+* ci: bump deputy pin v0.2.0 -&gt; v0.3.0
+
+v0.3.0 is a drop-in superset tagged on Krande/deputy.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01J3zfaYytWJnEeZrNGo3aup ([`525744c`](https://github.com/Krande/conda-server/commit/525744c5c3e8526abdc4357b8092a52ea6477a9c))
+
+
 ## v0.3.0 (2026-08-20)
 
 ### Feature
