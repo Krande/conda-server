@@ -62,6 +62,7 @@ CORS UI / Terraform resource).
 | `secrets.values.oidcClientId/Secret` | when `app.oidc.issuer` is set                 |
 | `ingress.host`                     | when `ingress.enabled=true`                     |
 | `bucketCors.bucket/endpoint/allowedOrigin` | when `bucketCors.enabled=true`          |
+| `blobCors.accountName/allowedOrigin` | when `blobCors.enabled=true` (azure backend) |
 
 ## How the moving parts fit together
 
@@ -79,6 +80,13 @@ managed or HA Postgres.
 `--aws-sigv4`. Required for the SPA's "Show files" feature when the
 storage origin differs from the app origin (every S3-compat self-host).
 Idempotent.
+
+**Blob CORS Job** (Helm post-install/post-upgrade hook): the Azure
+counterpart, gated on `blobCors.enabled`. Runs `az storage cors add`
+(clear-then-add for idempotency) to set a blob-service CORS rule on the
+storage account. Azure CORS is account-level, not per-container, so one
+rule covers every container. Same purpose as the S3 job: unblock the
+SPA's "Show files" cross-origin fetch to `*.blob.core.windows.net`.
 
 **NetworkPolicy** (off by default): one for the API pod (ingress from
 your ingress controller's namespace) and one for the bundled Postgres

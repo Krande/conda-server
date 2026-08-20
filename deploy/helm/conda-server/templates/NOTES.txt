@@ -25,6 +25,15 @@ Either enable bucketCors here or apply the rule via your cloud
 provider's UI.
 {{- end }}
 
+{{- if and (eq .Values.storage.backend "azure") (not .Values.blobCors.enabled) }}
+
+NOTE: storage.backend=azure but blobCors is disabled. The browser
+"Show files" feature on the package detail page won't work cross-
+origin until the storage account has a blob-service CORS rule allowing
+{{ .Values.app.baseUrl }}. Either enable blobCors here or run
+`az storage cors add --services b ...` against the account.
+{{- end }}
+
 {{- if not .Values.app.oidc.issuer }}
 
 NOTE: app.oidc.issuer is unset — the API will not let anyone log in.
