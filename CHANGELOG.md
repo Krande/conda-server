@@ -2,6 +2,44 @@
 
 
 
+## v0.3.0 (2026-08-20)
+
+### Feature
+
+* feat(helm): add Azure Blob CORS Job for the &#34;Show files&#34; fetch
+
+The SPA&#39;s &#34;Show files&#34; feature fetches the .conda via fetch()/XHR, which
+follows the server&#39;s 302 to a cross-origin object-store URL. For Azure
+that lands on https://&lt;account&gt;.blob.core.windows.net/... and the browser
+blocks it unless the blob service has a CORS rule allowing the app origin
+(&#34;No &#39;Access-Control-Allow-Origin&#39; header is present&#34;).
+
+The chart already solves this for S3 via the bucketCors PutBucketCors Job,
+but had no Azure equivalent. Azure Blob CORS is a blob-service
+(account-level) property, not per-container, set via &#34;Set Blob Service
+Properties&#34;. Add a blobCors post-install/post-upgrade Job that runs
+`az storage cors clear` + `az storage cors add` (clear-then-add for
+idempotency across upgrades), reusing the storage-account key from the
+existing s3SecretAccessKey secret. Off by default; gated on
+blobCors.enabled with required accountName + allowedOrigin.
+
+Also: NOTES.txt warns when backend=azure and blobCors is disabled, and the
+chart README + docs/deploying.md document the Azure variant (plus a
+standalone `az storage cors add` command for infra-managed setups).
+
+Validated with `helm lint` and `helm template` (enabled/disabled/missing-
+required paths, and that the S3 path is unaffected).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01J3zfaYytWJnEeZrNGo3aup ([`391a7d7`](https://github.com/Krande/conda-server/commit/391a7d72691d70b799ec626344a7153c053d7146))
+
+### Unknown
+
+* Merge pull request #8 from Krande/feat/azure-blob-cors
+
+feat: Azure Blob CORS Job for the browser &#34;Show files&#34; fetch ([`15a6165`](https://github.com/Krande/conda-server/commit/15a6165e4f4c7e6dfb20847ad819ec96b2a9a5ce))
+
+
 ## v0.2.1 (2026-08-20)
 
 ### Fix
