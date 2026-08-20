@@ -11,8 +11,8 @@ name: Build and push conda-server
 #
 # Required secrets:
 #   FORGEJO_HOST          - git host, e.g. git.example.com
-#   HARBOR_IMAGE          - image repo, e.g. registry.example.com/library/conda-server
-#   HARBOR_DOCKER_CONFIG  - ~/.docker/config.json contents with registry creds
+#   REGISTRY_IMAGE          - image repo, e.g. registry.example.com/library/conda-server
+#   REGISTRY_DOCKER_CONFIG  - ~/.docker/config.json contents with registry creds
 # Gitops step (all optional; the step self-skips unless the first four are set):
 #   GITOPS_REPO           - <owner>/<repo> of the gitops repo
 #   K8S_GITOPS_TOKEN      - PAT with write:repository on the gitops repo
@@ -31,7 +31,7 @@ jobs:
     runs-on: docker-build
     env:
       FORGEJO_HOST: ${{ secrets.FORGEJO_HOST }}
-      HARBOR_IMAGE: ${{ secrets.HARBOR_IMAGE }}
+      REGISTRY_IMAGE: ${{ secrets.REGISTRY_IMAGE }}
     steps:
       - name: Checkout
         run: |
@@ -42,7 +42,7 @@ jobs:
       - name: Login to registry
         run: |
           mkdir -p ~/.docker
-          echo '${{ secrets.HARBOR_DOCKER_CONFIG }}' > ~/.docker/config.json
+          echo '${{ secrets.REGISTRY_DOCKER_CONFIG }}' > ~/.docker/config.json
 
       - name: Build and push image
         run: |
@@ -52,15 +52,15 @@ jobs:
           docker build \
             --build-arg GIT_SHA=${GITHUB_SHA} \
             --build-arg BUILD_DATE=${BUILD_DATE} \
-            -t "${HARBOR_IMAGE}:${TAG}" \
-            -t "${HARBOR_IMAGE}:${BRANCH_TAG}" \
+            -t "${REGISTRY_IMAGE}:${TAG}" \
+            -t "${REGISTRY_IMAGE}:${BRANCH_TAG}" \
             .
-          docker push "${HARBOR_IMAGE}:${TAG}"
-          docker push "${HARBOR_IMAGE}:${BRANCH_TAG}"
+          docker push "${REGISTRY_IMAGE}:${TAG}"
+          docker push "${REGISTRY_IMAGE}:${BRANCH_TAG}"
           # `latest` tracks main only.
           if [ "${GITHUB_REF_NAME}" = "main" ]; then
-            docker tag "${HARBOR_IMAGE}:${TAG}" "${HARBOR_IMAGE}:latest"
-            docker push "${HARBOR_IMAGE}:latest"
+            docker tag "${REGISTRY_IMAGE}:${TAG}" "${REGISTRY_IMAGE}:latest"
+            docker push "${REGISTRY_IMAGE}:latest"
           fi
 
       - name: Bump image in gitops (deputy)
@@ -81,7 +81,7 @@ jobs:
           # python image — the runner has Docker. python:3.12 ships pip + git.
           docker run --rm \
             -e FORGEJO_HOST -e GITOPS_TOKEN -e GITOPS_REPO -e GITOPS_MANIFEST \
-            -e GITOPS_IMAGE_PATHS -e CI_EMAIL -e HARBOR_IMAGE -e TAG \
+            -e GITOPS_IMAGE_PATHS -e CI_EMAIL -e REGISTRY_IMAGE -e TAG \
             python:3.12 bash -euo pipefail -c '
               pip install --quiet "deputy @ git+https://github.com/Krande/deputy.git@v0.2.0"
               git config --global --add safe.directory "*"
@@ -94,7 +94,7 @@ jobs:
                 for p in $GITOPS_IMAGE_PATHS; do
                   deputy gitops-update --repo-dir . --file "$GITOPS_MANIFEST" \
                     --kind Deployment --image-path "$p" \
-                    --image "$HARBOR_IMAGE" --tag "$TAG" --no-push
+                    --image "$REGISTRY_IMAGE" --tag "$TAG" --no-push
                 done
                 git reset --soft origin/main
                 git config user.name "CI"
