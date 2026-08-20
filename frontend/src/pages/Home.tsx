@@ -118,7 +118,7 @@ export default function Home() {
           </section>
 
           <section className="grid gap-6 md:grid-cols-2">
-            <Card>
+            <Card className="min-w-0">
               <CardBody className="flex h-full flex-col space-y-3">
                 <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
                   {channelCount === 0 ? "No channels yet" : `${channelCount} channel${channelCount === 1 ? "" : "s"}`}
@@ -138,7 +138,7 @@ export default function Home() {
               </CardBody>
             </Card>
 
-            <Card>
+            <Card className="min-w-0">
               <CardBody className="space-y-3">
                 <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Quick install</h2>
                 <p className="text-sm text-slate-600 dark:text-slate-400">
@@ -195,7 +195,7 @@ function SearchResultsPanel({
 
   return (
     <div className="grid gap-6 md:grid-cols-2">
-      <Card>
+      <Card className="min-w-0">
         <CardBody className="space-y-2">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
             Packages ({packages.length})
@@ -220,7 +220,7 @@ function SearchResultsPanel({
         </CardBody>
       </Card>
 
-      <Card>
+      <Card className="min-w-0">
         <CardBody className="space-y-2">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
             Channels ({channels.length})
