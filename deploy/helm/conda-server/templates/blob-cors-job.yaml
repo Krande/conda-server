@@ -1,0 +1,77 @@
+{{- if .Values.blobCors.enabled }}
+{{- $cors := .Values.blobCors -}}
+{{- $account := required "blobCors.accountName is required when blobCors.enabled" $cors.accountName -}}
+{{- $origin := required "blobCors.allowedOrigin is required when blobCors.enabled" $cors.allowedOrigin -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "conda-server.fullname" . }}-blob-cors-{{ .Release.Revision }}
+  labels:
+    {{- include "conda-server.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: blob-cors
+          image: {{ $cors.image }}
+          # Azure Blob CORS is a *blob-service* (account-level) property set
+          # via "Set Blob Service Properties" — unlike S3 there is no
+          # per-container CORS, so this rule covers every container on the
+          # account. The azure-cli image ships `az` ready to run; it needs
+          # only a writable HOME, so it runs fine as a non-root UID.
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              # clear-then-add makes this idempotent across helm upgrades —
+              # otherwise `az storage cors add` appends a duplicate rule on
+              # every re-run. The account is dedicated to conda-server, so
+              # replacing the blob-service CORS ruleset is safe here.
+              az storage cors clear \
+                --services b \
+                --account-name "{{ $account }}" \
+                --account-key "${AZURE_STORAGE_KEY}"
+              az storage cors add \
+                --services b \
+                --methods GET HEAD \
+                --origins "{{ $origin }}" \
+                --allowed-headers '*' \
+                --exposed-headers 'Content-Length,Content-Type,Content-Disposition,ETag' \
+                --max-age 3600 \
+                --account-name "{{ $account }}" \
+                --account-key "${AZURE_STORAGE_KEY}"
+              echo "[blob-cors] applied to account {{ $account }} (blob service) <- {{ $origin }}"
+          env:
+            # az needs a writable HOME/config dir when run as a non-root UID.
+            - name: HOME
+              value: /tmp
+            - name: AZURE_CONFIG_DIR
+              value: /tmp/.azure
+            # The Azure account *key*. In an azure-backed deploy the chart's
+            # s3SecretAccessKey secret holds the storage-account key (obstore
+            # maps storage.secret_access_key -> Azure access_key), so we reuse
+            # it here rather than introducing a second secret.
+            - name: AZURE_STORAGE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "conda-server.secretName" . }}
+                  key: {{ .Values.secretKeys.s3SecretAccessKey }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+{{- end }}

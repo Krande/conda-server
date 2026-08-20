@@ -171,6 +171,31 @@ required on the S3 response — plain CORS is enough.
 For MinIO: `mc anonymous set-public`/the `Access-Control-*` parts of its
 Web Identity policy; see MinIO docs. For AWS: `aws s3api put-bucket-cors`.
 
+**For Azure Blob (`storage.backend=azure`):** the redirect lands on the
+`https://<account>.blob.core.windows.net/...` SAS URL, which is always a
+different origin than the app host, so the "Show files" fetch is blocked
+until the account has a CORS rule. Unlike S3, Azure Blob CORS is a
+**blob-service (account-level)** property — there is no per-container
+CORS — so a single rule covers every container:
+
+```bash
+az storage cors add \
+  --services b \
+  --methods GET HEAD \
+  --origins https://conda.example.com \
+  --allowed-headers '*' \
+  --exposed-headers 'Content-Length,Content-Type,Content-Disposition,ETag' \
+  --max-age 3600 \
+  --account-name <storage-account> \
+  --account-key "$AZURE_STORAGE_KEY"   # or --auth-mode login
+```
+
+`az storage cors add` appends, so re-running piles up duplicate rules;
+`az storage cors clear --services b` first if you want a clean replace.
+The Helm chart's `blobCors` Job automates exactly this (clear-then-add)
+as a post-install hook — set `blobCors.enabled=true`,
+`blobCors.accountName`, and `blobCors.allowedOrigin`.
+
 ### 3. Content-Type / Content-Disposition at PUT time
 
 Browsers MIME-sniff `application/octet-stream` responses, and a `.conda`
@@ -346,7 +371,7 @@ Symptoms you'll probably see at some point, and what they usually mean:
 |---|---|
 | `InvalidCertificate(UnknownIssuer)` on any outbound HTTPS | `SSL_CERT_FILE` not pointing at a CA bundle the container can read. |
 | `.conda` downloads saved as `.zip` | Object stored without `Content-Disposition` — re-upload, or set the header via storage CLI. |
-| "Failed to fetch" on the browser file-view for a specific archive | Missing CORS rule on the object storage bucket. |
+| "Failed to fetch" / "blocked by CORS policy" on the browser file-view ("Show files") | Missing CORS rule on the object storage. S3: `bucketCors` / `put-bucket-cors`. Azure Blob: blob-service CORS via `az storage cors add --services b` or `blobCors.enabled=true`. See "Browser CORS for the Show files view". |
 | Reindex silently "completes" but the DB doesn't reflect the new upload | Check for `S3Credentials -> Mapping` conversion errors in the pod logs. |
 | `unknown subdir` on a page refresh of a deep URL like `/channels/foo/packages/bar` | The SPA fallback route isn't ordered after the repodata route. Shouldn't happen with the shipped app; verify nothing reordered it. |
 | OIDC `redirect_uri_mismatch` | uvicorn not started with `--proxy-headers`, or the `BASE_URL` env doesn't match the hostname the IdP sees. |

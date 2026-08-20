@@ -208,6 +208,25 @@ bucketCors:
   image: curlimages/curl:8.11.1
 
 # ---------------------------------------------------------------------
+# Azure Blob CORS post-install Job. The Azure equivalent of bucketCors,
+# for storage.backend=azure. Azure Blob CORS is a *blob-service*
+# (account-level) property — there is no per-container CORS — so this
+# rule applies to every container on the account. Required when the SPA
+# is served from a different origin than the blob endpoint (always true
+# for *.blob.core.windows.net vs. your app host), otherwise the browser
+# "Show files" feature is blocked by CORS. Uses the storage-account key
+# from the chart's s3SecretAccessKey secret (obstore maps that to the
+# Azure access_key in azure deploys).
+# ---------------------------------------------------------------------
+blobCors:
+  enabled: false
+  accountName: ""                 # Azure storage account, e.g. stdataaibelasaconda001
+  allowedOrigin: ""               # https://conda.example.com (matches app.baseUrl)
+  # Must ship the `az` CLI. The official azure-cli image works out of the
+  # box and runs fine as a non-root UID (needs only a writable HOME).
+  image: mcr.microsoft.com/azure-cli:2.64.0
+
+# ---------------------------------------------------------------------
 # k8up backup wiring — gated on the cluster having the k8up CRDs.
 # ---------------------------------------------------------------------
 k8up:
