@@ -1,25 +1,37 @@
 name: Build and push conda-server
 
+# Runs on EVERY push to ANY branch (plus manual dispatch): builds the image,
+# pushes it to the registry, then bumps the image tag in the gitops repo with
+# `deputy gitops-update` (https://github.com/Krande/deputy).
+#
+# Every environment-specific value — git host, image repo, gitops repo, the
+# manifest path inside it, and the in-manifest image paths — is supplied as an
+# Actions secret, so nothing about the deployment target is committed here and
+# the workflow can live in a public mirror without leaking it.
+#
+# Required secrets:
+#   FORGEJO_HOST          - git host, e.g. git.example.com
+#   REGISTRY_IMAGE          - image repo, e.g. registry.example.com/library/conda-server
+#   REGISTRY_DOCKER_CONFIG  - ~/.docker/config.json contents with registry creds
+# Gitops step (all optional; the step self-skips unless the first four are set):
+#   GITOPS_REPO           - <owner>/<repo> of the gitops repo
+#   K8S_GITOPS_TOKEN      - PAT with write:repository on the gitops repo
+#   GITOPS_MANIFEST       - manifest path inside the gitops repo
+#   GITOPS_IMAGE_PATHS    - space-separated dotted image paths to bump in that
+#                           manifest (e.g. two container image fields)
+#   CI_EMAIL              - committer email for the gitops bump commit
+
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: ['**']
 
-# Infra-specific values (git host, image repo, gitops repo, CI identity) are
-# kept out of the repo and supplied as Actions secrets so this workflow can be
-# published without leaking the deployment environment. Required secrets:
-#   FORGEJO_HOST         - git host, e.g. git.example.com
-#   HARBOR_IMAGE         - fully-qualified image repo, e.g. registry.example.com/library/conda-server
-#   HARBOR_DOCKER_CONFIG - ~/.docker/config.json contents with registry creds
-#   GITOPS_REPO          - <owner>/<repo> of the gitops repo (optional)
-#   K8S_GITOPS_TOKEN     - PAT with write:repository on the gitops repo (optional)
-#   CI_EMAIL             - committer email for the gitops bump (optional)
 jobs:
   build:
     runs-on: docker-build
     env:
       FORGEJO_HOST: ${{ secrets.FORGEJO_HOST }}
-      HARBOR_IMAGE: ${{ secrets.HARBOR_IMAGE }}
+      REGISTRY_IMAGE: ${{ secrets.REGISTRY_IMAGE }}
     steps:
       - name: Checkout
         run: |
@@ -27,58 +39,77 @@ jobs:
             "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@${FORGEJO_HOST}/$GITHUB_REPOSITORY.git" \
             .
 
-      - name: Login to Harbor
+      - name: Login to registry
         run: |
           mkdir -p ~/.docker
-          echo '${{ secrets.HARBOR_DOCKER_CONFIG }}' > ~/.docker/config.json
+          echo '${{ secrets.REGISTRY_DOCKER_CONFIG }}' > ~/.docker/config.json
 
       - name: Build and push image
         run: |
           TAG="sha-${GITHUB_SHA::7}"
+          BRANCH_TAG="branch-$(printf '%s' "${GITHUB_REF_NAME}" | tr '/' '-')"
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           docker build \
             --build-arg GIT_SHA=${GITHUB_SHA} \
             --build-arg BUILD_DATE=${BUILD_DATE} \
-            -t "${HARBOR_IMAGE}:${TAG}" \
-            -t "${HARBOR_IMAGE}:latest" \
+            -t "${REGISTRY_IMAGE}:${TAG}" \
+            -t "${REGISTRY_IMAGE}:${BRANCH_TAG}" \
             .
-          docker push "${HARBOR_IMAGE}:${TAG}"
-          docker push "${HARBOR_IMAGE}:latest"
+          docker push "${REGISTRY_IMAGE}:${TAG}"
+          docker push "${REGISTRY_IMAGE}:${BRANCH_TAG}"
+          # `latest` tracks main only.
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            docker tag "${REGISTRY_IMAGE}:${TAG}" "${REGISTRY_IMAGE}:latest"
+            docker push "${REGISTRY_IMAGE}:latest"
+          fi
 
-      - name: Update image tag in gitops
+      - name: Bump image in gitops (deputy)
         env:
           GITOPS_TOKEN: ${{ secrets.K8S_GITOPS_TOKEN }}
           GITOPS_REPO: ${{ secrets.GITOPS_REPO }}
+          GITOPS_MANIFEST: ${{ secrets.GITOPS_MANIFEST }}
+          GITOPS_IMAGE_PATHS: ${{ secrets.GITOPS_IMAGE_PATHS }}
           CI_EMAIL: ${{ secrets.CI_EMAIL }}
         run: |
-          test -n "$GITOPS_TOKEN" && test -n "$GITOPS_REPO" || {
-            echo "K8S_GITOPS_TOKEN / GITOPS_REPO not set — skipping gitops update."
-            exit 0
-          }
-
-          TAG="sha-${GITHUB_SHA::7}"
-          WORK=$(mktemp -d)
-          cd "$WORK"
-          git clone "https://x-access-token:${GITOPS_TOKEN}@${FORGEJO_HOST}/${GITOPS_REPO}.git" .
-          git config user.name "Forgejo CI"
-          git config user.email "${CI_EMAIL:-ci@example.com}"
-
-          MANIFEST=workloads/conda-server/deployment.yaml
-          if [ ! -f "$MANIFEST" ]; then
-            echo "$MANIFEST does not exist yet; skipping."
+          if [ -z "$GITOPS_TOKEN" ] || [ -z "$GITOPS_REPO" ] \
+             || [ -z "$GITOPS_MANIFEST" ] || [ -z "$GITOPS_IMAGE_PATHS" ]; then
+            echo "gitops secrets not fully set — skipping gitops update."
             exit 0
           fi
-
-          for i in 1 2 3; do
-            git pull --rebase origin main
-            sed -i "s|image: ${HARBOR_IMAGE}:.*|image: ${HARBOR_IMAGE}:${TAG}|" "$MANIFEST"
-            git add "$MANIFEST"
-            git diff --cached --quiet && exit 0
-            git commit -m "[skip ci] ci: update conda-server to ${TAG}"
-            git push origin HEAD:main && exit 0
-            echo "Push failed (attempt $i), retrying..."
-            git reset --hard origin/main
-            sleep 2
-          done
-          echo "Failed to push after 3 attempts" >&2
-          exit 1
+          TAG="sha-${GITHUB_SHA::7}"
+          # The docker-build runner is Alpine (no python), so run deputy in a
+          # python image — the runner has Docker. python:3.12 ships pip + git.
+          docker run --rm \
+            -e FORGEJO_HOST -e GITOPS_TOKEN -e GITOPS_REPO -e GITOPS_MANIFEST \
+            -e GITOPS_IMAGE_PATHS -e CI_EMAIL -e REGISTRY_IMAGE -e TAG="$TAG" \
+            python:3.12 bash -euo pipefail -c '
+              pip install --quiet "deputy @ git+https://github.com/Krande/deputy.git@v0.2.0"
+              git config --global --add safe.directory "*"
+              for attempt in 1 2 3; do
+                WORK=$(mktemp -d); cd "$WORK"
+                git clone --depth 1 --branch main \
+                  "https://x-access-token:${GITOPS_TOKEN}@${FORGEJO_HOST}/${GITOPS_REPO}.git" .
+                # deputy patches one image path per call; --no-push so all paths
+                # land in a single squashed commit below.
+                for p in $GITOPS_IMAGE_PATHS; do
+                  deputy gitops-update --repo-dir . --file "$GITOPS_MANIFEST" \
+                    --kind Deployment --image-path "$p" \
+                    --image "$REGISTRY_IMAGE" --tag "$TAG" --no-push
+                done
+                git reset --soft origin/main
+                git config user.name "CI"
+                git config user.email "${CI_EMAIL:-ci@example.com}"
+                if git diff --cached --quiet; then
+                  echo "gitops already at ${TAG}; nothing to commit."
+                  exit 0
+                fi
+                git commit -m "[skip ci] ci: update conda-server to ${TAG}"
+                if git push origin HEAD:main; then
+                  exit 0
+                fi
+                echo "push failed (attempt ${attempt}), retrying…"
+                cd /; rm -rf "$WORK"; sleep 2
+              done
+              echo "failed to push gitops bump after 3 attempts" >&2
+              exit 1
+            '
