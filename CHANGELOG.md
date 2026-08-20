@@ -2,6 +2,164 @@
 
 
 
+## v0.2.1 (2026-08-20)
+
+### Fix
+
+* fix: force fresh frontend build per commit + checkout exact SHA
+
+The per-branch pipeline was shipping a stale UI: images were correctly
+tagged/baked with the new GIT_SHA (runtime layers rebuilt), but the frontend
+build stage was served from the CI&#39;s persistent DinD BuildKit cache — COPY
+frontend ./ and npm run build showed CACHED across commits even though
+frontend/ changed. Result: sha-&lt;new&gt; images carried an old dist/, so UI
+fixes never reached conda.krande.no despite a green build + gitops bump.
+
+- Dockerfile: add ARG GIT_SHA before COPY frontend ./ in the frontend stage
+  so its layer key changes every commit and npm run build always re-runs
+  (npm ci stays cached). GIT_SHA is already passed via --build-arg.
+- Workflow: git checkout --detach $GITHUB_SHA after clone so the build uses
+  the exact triggering commit rather than the clone&#39;s default branch.
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_013XewjLYVb35vQqLdWmamkq ([`b63f4b9`](https://github.com/Krande/conda-server/commit/b63f4b98dfa8526049b16bc89899a88a366cc78f))
+
+* fix: collapse grid-item min-width so mobile Home stops overflowing
+
+The first mobile-overflow pass fixed the InstallInstructions &lt;code&gt; and the
+Channels controls row, but Home still overflowed by ~352px: the Home cards
+are grid items (min-width: auto), so each resolved its automatic minimum to
+its own max-content — the non-wrapping install command — forcing the single
+mobile grid track to ~711px. The inner code&#39;s overflow-x-auto never engaged
+because its ancestor card refused to shrink.
+
+- Add min-w-0 to the Home grid Cards (main + search-result panels) so the
+  track collapses to the container and the command scrolls internally.
+- Add overflow-x-clip on the Layout root as a belt-and-suspenders guard: it
+  caps any residual/future horizontal overflow from scrolling the page
+  sideways (which is what pushed the account dropdown and Add-channel button
+  off-screen), and unlike overflow-x-hidden it leaves overflow-y visible so
+  the sticky header keeps working.
+
+Verified at 375px in admin state: Home and Channels both 0px overflow, the
+mobile drawer and Add-channel button sit within the viewport, and the header
+stays position:sticky at top after scroll.
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_013XewjLYVb35vQqLdWmamkq ([`ad5af17`](https://github.com/Krande/conda-server/commit/ad5af17c4bbce9b9e5e5332a2d21638c2f5327af))
+
+* fix(frontend): stop mobile horizontal overflow on Home and Channels
+
+Two right-edge elements were unreachable on narrow viewports without
+zooming out, both caused by content forcing the page wider than 100vw:
+
+- InstallInstructions: the command &lt;code&gt; is flex-1 + overflow-x-auto +
+  whitespace-nowrap but had the default min-width:auto, so it never
+  shrank below its full command text and overflow-x-auto never engaged
+  — the row pushed the whole page wide, sending the header&#39;s right-
+  anchored account dropdown off-screen. Add min-w-0 so it scrolls
+  internally instead.
+- Channels header controls: a fixed w-60 filter input beside a shrink-0
+  &#34;Add channel&#34; button couldn&#39;t fit a ~360px screen, spilling the
+  button past the right edge. Make the controls row full-width and let
+  the input flex/shrink on mobile (min-w-0 flex-1), restoring the fixed
+  240px width at sm+.
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_013XewjLYVb35vQqLdWmamkq ([`2ff936e`](https://github.com/Krande/conda-server/commit/2ff936e997ac954fdc46f6de1cdaf2c12913f48e))
+
+### Unknown
+
+* Merge pull request #7 from Krande/fix/mobile-ui-overflow
+
+fix: stop mobile horizontal overflow on Home and Channels ([`44dd9f2`](https://github.com/Krande/conda-server/commit/44dd9f26ed80979bc2e36702fa150e54e402fa86))
+
+* Merge pull request #6 from Krande/feat/forgejo-deputy-gitops
+
+chore: build + push + gitops bump on every commit via deputy ([`40e14db`](https://github.com/Krande/conda-server/commit/40e14db7c07493ee550d8d765036486344dfa5d3))
+
+* ci(forgejo): export TAG into deputy container (fix unbound var)
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_013XewjLYVb35vQqLdWmamkq ([`f1f015b`](https://github.com/Krande/conda-server/commit/f1f015b5beb42b9a711218ca108688ffaf796c46))
+
+* ci(forgejo): rename HARBOR_* secrets to REGISTRY_* (neutral)
+
+Avoid naming the registry implementation in a public-mirror workflow.
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_013XewjLYVb35vQqLdWmamkq ([`4f75d07`](https://github.com/Krande/conda-server/commit/4f75d07215bd068126d74310232cb708ec970c7f))
+
+* ci(forgejo): build+push+gitops on every branch via deputy
+
+Trigger on push to any branch (was main-only). Replace the inline sed
+gitops bump with `deputy gitops-update`, run in a python container on the
+Alpine docker-build runner. The manifest path and in-manifest image paths
+move into secrets (GITOPS_MANIFEST, GITOPS_IMAGE_PATHS) so no deployment
+detail is committed; the step self-skips when they are unset.
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_013XewjLYVb35vQqLdWmamkq ([`d4cc6e8`](https://github.com/Krande/conda-server/commit/d4cc6e86689b559cadb2de0a5e8202d05663c63d))
+
+* Merge pull request #5 from Krande/feat/deputy-toml-config
+
+chore: move deputy config to deputy.toml (deputy v0.2.0) ([`487afb8`](https://github.com/Krande/conda-server/commit/487afb809ac51d7aa3882a213b0ff8e2ed123613))
+
+* ci: bump all GitHub Action versions to current majors
+
+- actions/checkout v4 -&gt; v7
+- actions/setup-python v5 -&gt; v7
+- prefix-dev/setup-pixi v0.8.8 -&gt; v0.10.1
+- docker/login-action v3 -&gt; v4
+- docker/metadata-action v5 -&gt; v6
+- docker/setup-buildx-action v3 -&gt; v4
+- docker/build-push-action v6 -&gt; v7
+
+Versions confirmed against each action&#39;s latest release.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01J3zfaYytWJnEeZrNGo3aup ([`9dee418`](https://github.com/Krande/conda-server/commit/9dee418a09280255868a9cc997de42376eced9fc))
+
+* ci: move deputy config to deputy.toml, drop action_config.toml from CI flow
+
+deputy v0.2.0 reads a deputy.toml and ships the semantic-release defaults
+itself, so the workflows no longer need the DEPUTY_MARKER / DEPUTY_CONFIG env
+block or action_config.toml for releases.
+
+- Add deputy.toml: [pr_review].marker keeps the original sticky-comment thread,
+  [release].version_toml points at pyproject.toml (the rest are deputy defaults).
+- pr-review.yaml / tag-on-pr-merge.yaml: pin deputy @v0.2.0, drop the env block.
+
+action_config.toml stays only for lint.yaml&#39;s [tool.python.lint]; nothing in the
+deputy flow references it now. Verified: the deputy-rendered release config
+resolves the same version as action_config.toml (identical branch matching +
+pyproject.toml:project.version location).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01J3zfaYytWJnEeZrNGo3aup ([`1c3658b`](https://github.com/Krande/conda-server/commit/1c3658ba759412e91dcf6d9add635c339e3a5543))
+
+* Merge pull request #4 from Krande/feat/use-deputy-ci
+
+chore: use the deputy package instead of in-repo ci_tools ([`17ddaa6`](https://github.com/Krande/conda-server/commit/17ddaa649470180e79be5be9928dddcccfb73096))
+
+* ci: use the deputy package instead of the in-repo ci_tools
+
+The CI logic moved to its own repo (https://github.com/Krande/deputy, tagged
+v0.1.0). The workflows now install deputy from the pinned tag and call the
+`deputy` CLI instead of the vendored ci_tools package, which is removed.
+
+- pr-review.yaml / tag-on-pr-merge.yaml: pip install deputy@v0.1.0, call
+  `deputy pr-review` / `deputy tag-on-merge`. DEPUTY_MARKER keeps the existing
+  sticky-comment thread; DEPUTY_CONFIG points at action_config.toml.
+- Remove ci_tools/ and its pixi tasks (test-ci) + lint/format paths.
+
+Behaviour is unchanged; deputy is the same code (plus a new gitops-update
+command) with its own test suite living in the deputy repo.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01J3zfaYytWJnEeZrNGo3aup ([`75dd29c`](https://github.com/Krande/conda-server/commit/75dd29c5c8fc4aba27ad58c8690b75f85a0ea690))
+
+
 ## v0.2.0 (2026-08-19)
 
 ### Feature
