@@ -38,6 +38,9 @@ jobs:
           git clone \
             "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@${FORGEJO_HOST}/$GITHUB_REPOSITORY.git" \
             .
+          # Build the exact commit that triggered this run, not the clone's
+          # default branch — otherwise a feature-branch push builds main.
+          git checkout --detach "$GITHUB_SHA"
 
       - name: Login to registry
         run: |

@@ -32,8 +32,8 @@ export default function Channels() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold tracking-tight">Channels</h1>
-        <div className="flex items-center gap-2">
-          <div className="w-60 max-w-full">
+        <div className="flex w-full items-center gap-2 sm:w-auto">
+          <div className="min-w-0 flex-1 sm:w-60 sm:flex-none">
             <Input
               placeholder="Filter channels…"
               value={filter}

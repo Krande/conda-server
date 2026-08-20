@@ -41,7 +41,7 @@ export function InstallInstructions({ channel, packageName = "<package>", versio
               <span className="w-12 shrink-0 font-mono text-[11px] uppercase tracking-wider text-slate-500">
                 {m.label}
               </span>
-              <code className="flex-1 overflow-x-auto whitespace-nowrap font-mono text-[12.5px] text-slate-100">
+              <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-[12.5px] text-slate-100">
                 <span className="select-none text-brand-400">$ </span>
                 {m.cmd} <span className="text-slate-400">{m.flag}</span> {baseUrl} {spec}
               </code>
