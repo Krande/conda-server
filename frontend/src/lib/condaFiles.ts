@@ -122,6 +122,48 @@ async function decompressZstd(buf: Uint8Array): Promise<Uint8Array> {
   return merged;
 }
 
+/** Raised when the archive fetch itself fails, before any parsing.
+ *
+ *  ``kind: "network"`` means ``fetch()`` threw a ``TypeError`` — the
+ *  browser refused to hand us the response. This lumps together genuine
+ *  network failures and CORS rejections, because browsers deliberately
+ *  collapse the two into an indistinguishable ``TypeError: Failed to
+ *  fetch`` (the CORS-specific detail is only ever printed to the
+ *  devtools console, never exposed to JS). In this app the single most
+ *  common cause is a missing CORS rule on the object-storage
+ *  bucket/account: the download endpoint 302-redirects our same-origin
+ *  fetch to a cross-origin presigned URL (S3 / Azure Blob / GCS), and
+ *  without an allow rule for the site origin the browser blocks the
+ *  response. The UI treats this kind as "probably CORS" and shows an
+ *  actionable hint.
+ *
+ *  ``kind: "http"`` means the request completed but the server (or the
+ *  storage host) returned a non-2xx status — a real, readable error.
+ */
+export class CondaFilesFetchError extends Error {
+  readonly kind: "network" | "http";
+  readonly status?: number;
+  constructor(message: string, kind: "network" | "http", status?: number) {
+    super(message);
+    this.name = "CondaFilesFetchError";
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
+/** True when an error thrown by :func:`listCondaFiles` is a browser-level
+ *  fetch failure (network or, most often in this app, a blocked
+ *  cross-origin storage response). Uses a duck-typed ``kind`` check
+ *  rather than ``instanceof`` so it survives the dynamic-import module
+ *  boundary and any bundler class-identity quirks. */
+export function isNetworkFetchError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { kind?: unknown }).kind === "network"
+  );
+}
+
 export interface CondaFileEntry {
   path: string;
   size: number | null;
@@ -162,9 +204,26 @@ export async function listCondaFiles(url: string): Promise<CondaFilesResult> {
   // call pays the wasm latency, subsequent calls hit a resolved promise.
   const decoderReady = getZstdDecoder();
 
-  const resp = await fetch(url, { credentials: "same-origin" });
+  let resp: Response;
+  try {
+    resp = await fetch(url, { credentials: "same-origin" });
+  } catch (err) {
+    // fetch() only throws for network-level failures — DNS, connection
+    // refused, or (the common one here) a cross-origin storage response
+    // the browser blocked for want of a CORS rule. All arrive as an
+    // opaque TypeError; see CondaFilesFetchError for why we can't tell
+    // them apart and how the UI surfaces the CORS remedy.
+    throw new CondaFilesFetchError(
+      err instanceof Error ? err.message : String(err),
+      "network",
+    );
+  }
   if (!resp.ok) {
-    throw new Error(`download failed: ${resp.status} ${resp.statusText}`);
+    throw new CondaFilesFetchError(
+      `download failed: ${resp.status} ${resp.statusText}`,
+      "http",
+      resp.status,
+    );
   }
   const totalBytes = Number(resp.headers.get("content-length") ?? 0);
   const archiveBytes = new Uint8Array(await resp.arrayBuffer());

@@ -7,12 +7,14 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import {
+  about,
   audit,
   channels,
   packages,
   search,
   tokens,
   upstream,
+  type AboutResponse,
   type AuditQuery,
   type CreateChannelBody,
   type ImportJob,
@@ -41,6 +43,19 @@ export const queryKeys = {
     ["channels", channel, "packages", name] as const,
   tokens: ["tokens"] as const,
 };
+
+export function useAbout(enabled = true) {
+  // Shares the ["about"] cache entry with the About page, so opening
+  // "Show files" doesn't trigger a second request when the About page
+  // has already been visited. Deployment-static, so keep it fresh for a
+  // good while.
+  return useQuery<AboutResponse>({
+    queryKey: ["about"] as const,
+    queryFn: ({ signal }) => about.get(signal),
+    enabled,
+    staleTime: 60 * 60 * 1000,
+  });
+}
 
 export function useResolvePackages(names: string[], enabled = true) {
   // Stable key: sort before joining so ["a","b"] and ["b","a"] share a cache entry.

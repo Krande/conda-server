@@ -6,8 +6,9 @@ import { EmptyState, ErrorState } from "@/components/ui/EmptyState";
 import { Input } from "@/components/ui/Input";
 import { PageSpinner } from "@/components/ui/Spinner";
 import { InstallInstructions } from "@/components/InstallInstructions";
-import { packageDownloadUrl } from "@/lib/api";
+import { packageDownloadUrl, type StorageBackend } from "@/lib/api";
 import {
+  useAbout,
   useChannel,
   useDeletePackageVersion,
   usePackage,
@@ -286,11 +287,20 @@ interface FilesState {
   phase: FilesPhase;
   result?: CondaFilesResult;
   error?: string;
+  // True when the failure was a browser-level fetch error (network or,
+  // most often, a cross-origin storage response blocked for want of a
+  // CORS rule). Drives the actionable CORS hint below.
+  networkError?: boolean;
 }
 
 function FilesSection({ channel, v }: { channel: string; v: PackageVersion }) {
   const [state, setState] = useState<FilesState>({ phase: "idle" });
   const [filter, setFilter] = useState("");
+  // Only fetch /about once we've actually hit an error — the backend
+  // type only matters for tailoring the CORS hint, and the result is
+  // cached (shared with the About page) so a retry costs nothing.
+  const about = useAbout(state.phase === "error");
+  const storageBackend = about.data?.storage_backend;
 
   // .tar.bz2 needs a different decompressor than zstd and the client-side
   // parser would bloat for a deprecated format. Hide the action there and
@@ -307,7 +317,19 @@ function FilesSection({ channel, v }: { channel: string; v: PackageVersion }) {
       const result = await mod.listCondaFiles(url);
       setState({ phase: "ready", result });
     } catch (err) {
-      setState({ phase: "error", error: err instanceof Error ? err.message : String(err) });
+      // Duck-typed rather than instanceof CondaFilesFetchError so we don't
+      // pull the (lazy) condaFiles module into this error path, and so it
+      // survives the dynamic-import boundary. Matches isNetworkFetchError
+      // in condaFiles.ts.
+      const networkError =
+        typeof err === "object" &&
+        err !== null &&
+        (err as { kind?: unknown }).kind === "network";
+      setState({
+        phase: "error",
+        error: err instanceof Error ? err.message : String(err),
+        networkError,
+      });
     }
   };
 
@@ -383,9 +405,12 @@ function FilesSection({ channel, v }: { channel: string; v: PackageVersion }) {
       )}
 
       {state.phase === "error" && (
-        <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
-          {state.error}
-        </div>
+        <FilesError
+          message={state.error ?? "Unknown error"}
+          networkError={!!state.networkError}
+          backend={storageBackend}
+          onRetry={load}
+        />
       )}
 
       {state.phase === "idle" && (
@@ -395,6 +420,98 @@ function FilesSection({ channel, v }: { channel: string; v: PackageVersion }) {
           Expect a few seconds for a ~100 MB package.
         </p>
       )}
+    </div>
+  );
+}
+
+// Deep-link into the operator docs' CORS troubleshooting section. Points
+// at the canonical OSS repo (generic — no deployment-specific host).
+const CORS_DOCS_URL =
+  "https://github.com/Krande/conda-server/blob/main/docs/deploying.md#troubleshooting-browser-file-listing-cors";
+
+/** Per-backend, one-line remedy for a blocked cross-origin storage fetch.
+ *  Returns null when CORS can't be the cause (local backend serves the
+ *  bytes same-origin) so the caller falls back to a plain network hint. */
+function corsRemedy(backend: StorageBackend | undefined, origin: string): string | null {
+  switch (backend) {
+    case "local":
+      // Local backend streams through the app itself — same origin, so a
+      // failure here is a genuine network/server problem, not CORS.
+      return null;
+    case "s3":
+      return `The storage backend is S3-compatible. Add a bucket CORS rule allowing GET/HEAD from ${origin} (PutBucketCors, e.g. \`aws s3api put-bucket-cors\`).`;
+    case "azure":
+      return `The storage backend is Azure Blob. Add an account-level CORS rule allowing GET/HEAD from ${origin} (e.g. \`az storage cors add --services b --methods GET HEAD --origins ${origin}\`).`;
+    case "gcs":
+      return `The storage backend is Google Cloud Storage. Set a bucket CORS rule allowing GET/HEAD from ${origin} (e.g. \`gcloud storage buckets update --cors-file\`).`;
+    default:
+      // Backend unknown (e.g. /about hasn't loaded) — stay storage-agnostic.
+      return `If the server uses cloud object storage (S3 / Azure Blob / GCS), its bucket/account may need a CORS rule allowing this origin (${origin}).`;
+  }
+}
+
+function FilesError({
+  message,
+  networkError,
+  backend,
+  onRetry,
+}: {
+  message: string;
+  networkError: boolean;
+  backend: StorageBackend | undefined;
+  onRetry: () => void;
+}) {
+  const origin = typeof window !== "undefined" ? window.location.origin : "this site's origin";
+  const remedy = networkError ? corsRemedy(backend, origin) : null;
+
+  // A plain HTTP/parse error, or a local-backend network blip: show the
+  // raw message, nothing to hint at.
+  if (!networkError || remedy === null) {
+    return (
+      <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+        {networkError
+          ? "Couldn't load files — the request to the server failed. Check your connection and retry."
+          : message}
+        {networkError && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="ml-2 underline hover:no-underline"
+          >
+            Retry
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 space-y-1.5 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+      <p className="font-medium">Couldn't load files — the download was blocked by the browser.</p>
+      <p>
+        The file list is unpacked in your browser, so it fetches the package
+        directly from the server's object storage. That fetch failed the way a
+        missing CORS rule looks (browsers hide the exact reason). {remedy}
+      </p>
+      <p>
+        See the{" "}
+        <a
+          href={CORS_DOCS_URL}
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium underline hover:no-underline"
+        >
+          CORS troubleshooting docs ↗
+        </a>{" "}
+        for per-backend steps, then{" "}
+        <button type="button" onClick={onRetry} className="underline hover:no-underline">
+          retry
+        </button>
+        .
+      </p>
+      <p className="text-amber-700/80 dark:text-amber-300/70">
+        <span className="font-mono">{message}</span>
+      </p>
     </div>
   );
 }

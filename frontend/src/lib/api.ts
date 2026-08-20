@@ -263,9 +263,17 @@ export interface AboutStats {
   import_jobs_running: number;
 }
 
+// Storage backends the server can be configured with. Mirrors
+// StorageBackend in src/conda_server/config.py.
+export type StorageBackend = "local" | "s3" | "azure" | "gcs";
+
 export interface AboutResponse {
   build: AboutBuild;
   stats: AboutStats;
+  // Object-storage backend the deployment runs on. Used to tailor the
+  // "Show files" CORS hint. Optional so an older/cached server that
+  // predates the field doesn't break the type.
+  storage_backend?: StorageBackend;
 }
 
 export const about = {

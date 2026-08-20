@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 
 from conda_server import __version__
 from conda_server.auth import current_user
+from conda_server.config import StorageBackend, get_settings
 from conda_server.db import SessionDep
 from conda_server.models import (
     Channel,
@@ -52,6 +53,12 @@ class AboutStats(BaseModel):
 class AboutResponse(BaseModel):
     build: AboutBuild
     stats: AboutStats
+    # Which object-storage backend the deployment is configured with
+    # (local / s3 / azure / gcs). Read-only, non-sensitive — no URLs or
+    # credentials. The SPA uses it to tailor the "Show files" CORS hint
+    # when a cross-origin fetch to cloud storage is blocked by the
+    # browser (see frontend/src/lib/condaFiles.ts).
+    storage_backend: StorageBackend
 
 
 def _rattler_version() -> str:
@@ -109,4 +116,8 @@ async def about(
         import_jobs_running=int(jobs_running),
     )
 
-    return AboutResponse(build=build, stats=stats)
+    return AboutResponse(
+        build=build,
+        stats=stats,
+        storage_backend=get_settings().storage.backend,
+    )

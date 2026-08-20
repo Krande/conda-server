@@ -371,11 +371,90 @@ Symptoms you'll probably see at some point, and what they usually mean:
 |---|---|
 | `InvalidCertificate(UnknownIssuer)` on any outbound HTTPS | `SSL_CERT_FILE` not pointing at a CA bundle the container can read. |
 | `.conda` downloads saved as `.zip` | Object stored without `Content-Disposition` — re-upload, or set the header via storage CLI. |
-| "Failed to fetch" / "blocked by CORS policy" on the browser file-view ("Show files") | Missing CORS rule on the object storage. S3: `bucketCors` / `put-bucket-cors`. Azure Blob: blob-service CORS via `az storage cors add --services b` or `blobCors.enabled=true`. See "Browser CORS for the Show files view". |
+| "Failed to fetch" / "blocked by CORS policy" on the browser file-view ("Show files"), or the app's in-UI "download was blocked by the browser" hint | Missing CORS rule on the object storage. See [Troubleshooting: browser file listing (CORS)](#troubleshooting-browser-file-listing-cors) for the per-backend fix (S3 / Azure Blob / GCS). |
 | Reindex silently "completes" but the DB doesn't reflect the new upload | Check for `S3Credentials -> Mapping` conversion errors in the pod logs. |
 | `unknown subdir` on a page refresh of a deep URL like `/channels/foo/packages/bar` | The SPA fallback route isn't ordered after the repodata route. Shouldn't happen with the shipped app; verify nothing reordered it. |
 | OIDC `redirect_uri_mismatch` | uvicorn not started with `--proxy-headers`, or the `BASE_URL` env doesn't match the hostname the IdP sees. |
 | Pod can't reach its own S3 endpoint | If the endpoint resolves to a private IP outside the cluster, add `hostAliases` pointing the hostname at your ingress controller. |
+
+## Troubleshooting: browser file listing (CORS)
+
+**Symptom.** In the package view, clicking **Show files** fails. The app
+shows a hint like *"Couldn't load files — the download was blocked by the
+browser"* and links here; the browser devtools console shows a
+`TypeError: Failed to fetch` and/or a *"blocked by CORS policy"* warning.
+
+**Cause.** "Show files" downloads the `.conda` and unpacks it *in the
+browser* — the server isn't involved in the parse. The download endpoint
+302-redirects that fetch to a **presigned URL on your object storage**
+(S3 / Azure Blob / GCS), which is a different origin than the app. Unless
+the bucket/account has a CORS rule allowing your site's origin, the
+browser blocks the response before JavaScript can read it. Browsers
+deliberately hide whether a failure was CORS or a plain network error, so
+the app can only heuristically suggest CORS — but a missing rule is by far
+the most common cause.
+
+The fix is a one-time CORS rule on the storage backend. In every case the
+**allowed origin is the app's own origin** (the `scheme://host[:port]` you
+load the UI from — the app fills this into its hint automatically; use the
+same value below). Allow `GET` and `HEAD`. Local-filesystem backends serve
+bytes through the app itself (same origin) and need no CORS rule — a
+failure there is a genuine network/server issue, not CORS.
+
+Which backend you run is shown on the **About** page (and in the
+`/api/about` response as `storage_backend`).
+
+### S3 / S3-compatible (`storage.backend=s3`)
+
+See [Browser CORS for the "Show files" view](#2-browser-cors-for-the-show-files-view)
+above for the full Garage / MinIO / AWS walkthrough. In short: apply a
+bucket CORS rule via `PutBucketCors` (`aws s3api put-bucket-cors`, or the
+raw S3 API for Garage) allowing `GET`/`HEAD` from your origin.
+
+### Azure Blob (`storage.backend=azure`)
+
+Azure Blob CORS is an **account-level** (blob-service) property — one rule
+covers every container. See the
+[Azure Blob steps](#2-browser-cors-for-the-show-files-view) above:
+
+```bash
+az storage cors add \
+  --services b --methods GET HEAD \
+  --origins https://conda.example.com \
+  --allowed-headers '*' \
+  --exposed-headers 'Content-Length,Content-Type,Content-Disposition,ETag' \
+  --max-age 3600 \
+  --account-name <storage-account> --account-key "$AZURE_STORAGE_KEY"
+```
+
+### Google Cloud Storage (`storage.backend=gcs`)
+
+GCS CORS is a **per-bucket** property, set from a JSON file:
+
+```bash
+cat > cors.json <<'JSON'
+[
+  {
+    "origin": ["https://conda.example.com"],
+    "method": ["GET", "HEAD"],
+    "responseHeader": ["Content-Length", "Content-Type", "Content-Disposition", "ETag"],
+    "maxAgeSeconds": 3600
+  }
+]
+JSON
+
+# Modern gcloud:
+gcloud storage buckets update gs://my-bucket --cors-file=cors.json
+# Or legacy gsutil:
+gsutil cors set cors.json gs://my-bucket
+```
+
+Verify with `gcloud storage buckets describe gs://my-bucket --format='default(cors_config)'`
+(or `gsutil cors get gs://my-bucket`).
+
+As with S3, this flow uses `credentials: "same-origin"`, so
+`Access-Control-Allow-Credentials` is **not** required on the storage
+response — a plain origin allow-list is enough.
 
 ## Helm chart
 
