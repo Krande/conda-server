@@ -10,8 +10,8 @@ platforms = ["linux-64", "osx-arm64", "win-64"]
 default = { features = ["prod"], solve-group = "default" }
 dev = { features = ["prod", "dev"], solve-group = "default" }
 # Isolated, minimal env whose linters are pinned to the exact versions CI
-# runs (see action_config.toml [tool.python.lint]). Its own solve-group keeps
-# these hard pins from constraining the app's dependency solve.
+# runs (the ruff pin in [feature.lint.dependencies] below). Its own
+# solve-group keeps these hard pins from constraining the app's dependency solve.
 lint = { features = ["lint"], solve-group = "lint" }
 
 [feature.prod.dependencies]
@@ -55,7 +55,7 @@ nodejs = "*"
 
 # ruff (formatter + linter, incl. the `I` import-sort rule) is the single
 # source of truth for style here, pinned to the exact version CI enforces
-# (action_config.toml [tool.python.lint]). black/isort are intentionally
+# (the `ruff` pin just below is that version). black/isort are intentionally
 # NOT used — they disagree with `ruff format`, and mixing them would make
 # lint uncloseable.
 [feature.lint.dependencies]
