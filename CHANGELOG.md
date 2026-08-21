@@ -2,6 +2,78 @@
 
 
 
+## v0.5.1 (2026-08-21)
+
+### Chore
+
+* chore: drop remnant action_config.toml (deputy uses deputy.toml)
+
+deputy (https://github.com/Krande/deputy) reads deputy.toml for pr-review
+and release config; the old action_config.toml is no longer read by
+anything — the CI-pinned ruff version lives in pixi.toml
+[feature.lint.dependencies], and lint.yaml just runs `pixi run lint`.
+Delete the file and refresh the now-stale comments that pointed at it.
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_013XewjLYVb35vQqLdWmamkq ([`13eaa5d`](https://github.com/Krande/conda-server/commit/13eaa5d210738c403da03fe1770d5df7793930bc))
+
+### Fix
+
+* fix: order package versions by conda version, add sortable columns
+
+The package page listed versions in whatever order the rows came back
+from the DB — effectively upload order — so a package that had 0.10.0
+uploaded before 0.9.0 rendered a garbled sequence. Sorting the strings
+would not have fixed it: &#34;0.10.0&#34; &lt; &#34;0.9.0&#34; lexicographically, which is
+exactly backwards, and conda&#39;s real ordering also has to account for
+epochs (1!1.0), .post/.dev suffixes, and the rule that 2.31 and 2.31.0
+are the same version rather than adjacent ones.
+
+New conda_server.versions module delegates the comparison to
+rattler.Version — the reference implementation of the ordering conda
+itself uses, already a dependency here for the solver and archive
+reader. The module adds a parse cache, a total order for strings rattler
+can&#39;t parse (they sort last instead of raising mid-request), and the
+artifact-level tiebreak: version descending, then build number
+descending, then subdir and build ascending so row order is stable
+across requests.
+
+The package endpoints now sort through that, which also fixes the
+channel list page — it reads versions[0] as &#34;latest version&#34;. Mirror
+channels had the same bug in their own filename-derived listing
+(mirror_listing sorted the version strings directly); they go through
+the shared sort now too.
+
+Sorting stays server-side but in Python, not SQL: conda ordering isn&#39;t
+expressible as an ORDER BY, and the endpoint already materialises every
+version of the package to serialize it. Cost is bounded by the
+per-package version count, not the channel size.
+
+Frontend: version, build, subdir, size and the new &#34;Added&#34; column are
+click-to-sort, clicking again reverses. Rather than reimplement conda&#39;s
+ordering rules in TypeScript, the server sends a dense version_order
+rank (0 = newest, shared by every build of one version) and the client
+sorts on that integer, so both ends agree by construction. Ties fall
+back to the server&#39;s canonical order in both directions.
+
+The &#34;Added&#34; column reads PackageVersion.created_at, which has existed
+since the initial schema — no migration needed. Mirror channels have no
+row to read, so they fall back to the storage object&#39;s last-modified.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01Mdyz12Wh4LQgzdAN1DYneo ([`ee159ae`](https://github.com/Krande/conda-server/commit/ee159ae902affe3f77e604668d227e08792af145))
+
+### Unknown
+
+* Merge pull request #13 from Krande/fix/package-version-sorting
+
+fix: order package versions by conda version, add sortable columns ([`927bd88`](https://github.com/Krande/conda-server/commit/927bd88d8e15354b7121a32c25fcd040d7644302))
+
+* Merge pull request #12 from Krande/chore/drop-action-config
+
+chore: drop remnant action_config.toml (deputy uses deputy.toml) ([`12ff63d`](https://github.com/Krande/conda-server/commit/12ff63d9f273580ad830a32b5d8008532be09e72))
+
+
 ## v0.5.0 (2026-08-21)
 
 ### Chore
