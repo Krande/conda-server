@@ -4,9 +4,30 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { InstallInstructions } from "@/components/InstallInstructions";
-import { useChannels, useSearch } from "@/lib/queries";
+import { useChannels, useRecentUploads, useSearch } from "@/lib/queries";
+import type { RecentUpload } from "@/lib/api";
 
 const MIN_QUERY = 2;
+
+/**
+ * Human-friendly "time since upload". Recent uploads read in minutes/hours/
+ * days; anything older than a week just shows the calendar date, since the
+ * exact elapsed time stops being interesting at that range.
+ */
+function relativeUploadTime(iso: string | null, now: number): string {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const secs = Math.max(0, Math.round((now - then) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} hr${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
+  return new Date(then).toLocaleDateString();
+}
 
 /**
  * Lightweight debounce — just a setTimeout dance to avoid hammering
@@ -28,6 +49,8 @@ export default function Home() {
   const mirrorCount = channels?.filter((c) => c.mirror_url).length ?? 0;
   const privateCount = channels?.filter((c) => c.private).length ?? 0;
   const publicCount = channelCount - privateCount;
+
+  const recentQ = useRecentUploads(5);
 
   const [q, setQ] = useState("");
   const debouncedQ = useDebounced(q, 200);
@@ -118,25 +141,11 @@ export default function Home() {
           </section>
 
           <section className="grid gap-6 md:grid-cols-2">
-            <Card className="min-w-0">
-              <CardBody className="flex h-full flex-col space-y-3">
-                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                  {channelCount === 0 ? "No channels yet" : `${channelCount} channel${channelCount === 1 ? "" : "s"}`}
-                </h2>
-                <p className="text-sm text-slate-600 dark:text-slate-400">
-                  Channels organize packages. Each channel has its own storage prefix and access rules.
-                </p>
-                <div className="mt-auto pt-2">
-                  <Link
-                    to="/channels"
-                    className="inline-flex items-center gap-1 text-sm font-medium text-brand-700 hover:underline dark:text-brand-400"
-                  >
-                    View channels
-                    <span aria-hidden="true">→</span>
-                  </Link>
-                </div>
-              </CardBody>
-            </Card>
+            <RecentUploadsCard
+              uploads={recentQ.data}
+              loading={recentQ.isLoading}
+              error={recentQ.error}
+            />
 
             <Card className="min-w-0">
               <CardBody className="space-y-3">
@@ -151,6 +160,66 @@ export default function Home() {
         </>
       )}
     </div>
+  );
+}
+
+function RecentUploadsCard({
+  uploads,
+  loading,
+  error,
+}: {
+  uploads: RecentUpload[] | undefined;
+  loading: boolean;
+  error: Error | null;
+}) {
+  // Stamped once per render so all rows share a consistent "now"; the
+  // 60s query staleTime refreshes the list, which re-renders these.
+  const now = Date.now();
+  return (
+    <Card className="min-w-0">
+      <CardBody className="flex h-full flex-col space-y-3">
+        <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+          Recently uploaded
+        </h2>
+        {error ? (
+          <p className="text-sm text-red-700 dark:text-red-400">
+            Couldn't load recent uploads.
+          </p>
+        ) : loading && !uploads ? (
+          <p className="text-sm text-slate-500 dark:text-slate-400">Loading…</p>
+        ) : !uploads || uploads.length === 0 ? (
+          <p className="text-sm text-slate-600 dark:text-slate-400">
+            No package uploads yet. Uploaded packages will show up here.
+          </p>
+        ) : (
+          <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+            {uploads.map((u) => (
+              <li key={`${u.channel}/${u.name}/${u.version}`} className="py-2">
+                <Link
+                  to={`/channels/${encodeURIComponent(u.channel)}/packages/${encodeURIComponent(u.name)}`}
+                  className="flex items-baseline justify-between gap-3 text-sm hover:underline"
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    <span className="font-medium text-slate-900 dark:text-slate-100">
+                      {u.name}
+                    </span>
+                    <span className="ml-1.5 text-xs text-slate-500 dark:text-slate-400">
+                      {u.version}
+                    </span>
+                  </span>
+                  <span className="shrink-0 whitespace-nowrap text-xs text-slate-500 dark:text-slate-400">
+                    {relativeUploadTime(u.created_at, now)}
+                  </span>
+                </Link>
+                <p className="truncate text-xs text-slate-400 dark:text-slate-500">
+                  {u.channel}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardBody>
+    </Card>
   );
 }
 

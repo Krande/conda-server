@@ -18,6 +18,7 @@ import {
   type AuditQuery,
   type CreateChannelBody,
   type ImportJob,
+  type RecentUpload,
   type ResolveResult,
   type SearchResults,
 } from "./api";
@@ -41,8 +42,20 @@ export const queryKeys = {
   packages: (channel: string) => ["channels", channel, "packages"] as const,
   package: (channel: string, name: string) =>
     ["channels", channel, "packages", name] as const,
+  recent: (limit: number) => ["recent", limit] as const,
   tokens: ["tokens"] as const,
 };
+
+export function useRecentUploads(limit = 5, enabled = true) {
+  return useQuery<RecentUpload[]>({
+    queryKey: queryKeys.recent(limit),
+    queryFn: ({ signal }) => search.recent(limit, signal),
+    enabled,
+    // Cheap, and freshness matters for a "recent" list — but don't hammer:
+    // a minute-stale list is fine and relative times are recomputed on render.
+    staleTime: 60_000,
+  });
+}
 
 export function useAbout(enabled = true) {
   // Shares the ["about"] cache entry with the About page, so opening
