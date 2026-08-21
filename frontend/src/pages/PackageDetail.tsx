@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -29,6 +29,123 @@ function formatSize(bytes: number | null): string {
   return `${n.toFixed(n >= 10 ? 0 : 1)} ${units[i]}`;
 }
 
+function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+type SortKey = "version" | "build" | "subdir" | "size" | "added";
+type SortDir = "asc" | "desc";
+interface SortState {
+  key: SortKey;
+  dir: SortDir;
+}
+
+/** Direction a column starts in when you first click it.
+ *
+ *  Newest-first for the two time-ish columns and biggest-first for size
+ *  — the interesting end of each — but A→Z for the text columns, where
+ *  ascending is what people expect.
+ */
+const INITIAL_DIR: Record<SortKey, SortDir> = {
+  version: "desc",
+  build: "asc",
+  subdir: "asc",
+  size: "desc",
+  added: "desc",
+};
+
+/** Compare two rows *ascending* by the given column.
+ *
+ *  Version ordering is not computed here: conda's rules (epochs,
+ *  `.post` / `.dev`, `2.31` == `2.31.0`, segment-wise numeric compare)
+ *  are subtle enough that reimplementing them in the browser would be a
+ *  second thing to keep correct. The server ranks the versions with
+ *  rattler and sends the rank as `version_order` (0 = newest), so this
+ *  is a numeric compare — inverted, because ascending *version* means
+ *  descending rank.
+ *
+ *  Missing values (no size, no date — both happen on mirror channels)
+ *  sort last in whichever direction is active, so a column of blanks
+ *  never pushes real rows off the top.
+ */
+function compareAsc(key: SortKey, a: PackageVersion, b: PackageVersion): number {
+  switch (key) {
+    case "version":
+      return (b.version_order ?? 0) - (a.version_order ?? 0);
+    case "build":
+      return a.build.localeCompare(b.build);
+    case "subdir":
+      return a.subdir.localeCompare(b.subdir);
+    case "size":
+      return nullsLast(a.size, b.size);
+    case "added":
+      return nullsLast(dateValue(a.created_at), dateValue(b.created_at));
+  }
+}
+
+function dateValue(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? null : t;
+}
+
+function nullsLast(a: number | null | undefined, b: number | null | undefined): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return a - b;
+}
+
+function SortHeader({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  align = "left",
+}: {
+  label: string;
+  sortKey: SortKey;
+  sort: SortState;
+  onSort: (key: SortKey) => void;
+  align?: "left" | "right";
+}) {
+  const active = sort.key === sortKey;
+  return (
+    <th
+      className={`px-5 py-3 font-medium ${align === "right" ? "text-right" : ""}`}
+      aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={`group inline-flex cursor-pointer items-center gap-1 uppercase tracking-wide transition-colors hover:text-slate-900 dark:hover:text-slate-100 ${
+          active ? "text-slate-900 dark:text-slate-100" : ""
+        }`}
+        title={`Sort by ${label.toLowerCase()}`}
+      >
+        {label}
+        <span
+          aria-hidden
+          className={`text-[9px] leading-none transition-opacity ${
+            active
+              ? "text-brand-700 dark:text-brand-400"
+              : "text-slate-400 opacity-0 group-hover:opacity-100 dark:text-slate-500"
+          }`}
+        >
+          {active && sort.dir === "asc" ? "▲" : "▼"}
+        </span>
+      </button>
+    </th>
+  );
+}
+
 /** Strip the leading package name from a conda match-spec.
  *
  *  Match-specs look like "numpy", "numpy >=1.0", "openssl >=3.5,<4.0a0",
@@ -55,6 +172,24 @@ export default function PackageDetail() {
   // Per-row expansion state. Identified by the synthetic key the rows
   // already use (subdir + filename is unique within a package).
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // Default matches what the server already sends — newest version
+  // first — so the first paint needs no reordering.
+  const [sort, setSort] = useState<SortState>({ key: "version", dir: "desc" });
+
+  const versions = data?.versions;
+  const sortedVersions = useMemo(() => {
+    if (!versions) return [];
+    // Decorate with the server's index so ties always fall back to the
+    // canonical order (build number descending, then subdir/build)
+    // instead of flipping when the direction flips.
+    const rows = versions.map((v, i) => ({ v, i }));
+    const mul = sort.dir === "asc" ? 1 : -1;
+    rows.sort((x, y) => {
+      const primary = compareAsc(sort.key, x.v, y.v) * mul;
+      return primary !== 0 ? primary : x.i - y.i;
+    });
+    return rows.map((r) => r.v);
+  }, [versions, sort]);
 
   if (isLoading) return <PageSpinner />;
   if (error) return <ErrorState error={error} />;
@@ -67,6 +202,15 @@ export default function PackageDetail() {
 
   const toggle = (key: string) =>
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  // Clicking the active column reverses it; clicking a new one starts
+  // from that column's natural direction.
+  const handleSort = (key: SortKey) =>
+    setSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: INITIAL_DIR[key] },
+    );
 
   const handleDelete = (subdir: string, filename: string) => {
     if (!window.confirm(`Delete ${filename}? The bytes and row go now; repodata updates after the background reindex.`)) {
@@ -115,22 +259,29 @@ export default function PackageDetail() {
         ) : (
           <Card className="overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px] border-collapse text-sm">
+              <table className="w-full min-w-[760px] border-collapse text-sm">
                 <thead>
                   <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-slate-800 dark:text-slate-400">
-                    <th className="px-5 py-3 font-medium">Version</th>
-                    <th className="px-5 py-3 font-medium">Build</th>
-                    <th className="px-5 py-3 font-medium">Subdir</th>
-                    <th className="px-5 py-3 text-right font-medium">Size</th>
+                    <SortHeader label="Version" sortKey="version" sort={sort} onSort={handleSort} />
+                    <SortHeader label="Build" sortKey="build" sort={sort} onSort={handleSort} />
+                    <SortHeader label="Subdir" sortKey="subdir" sort={sort} onSort={handleSort} />
+                    <SortHeader
+                      label="Size"
+                      sortKey="size"
+                      sort={sort}
+                      onSort={handleSort}
+                      align="right"
+                    />
+                    <SortHeader label="Added" sortKey="added" sort={sort} onSort={handleSort} />
                     <th className="px-5 py-3 font-medium">Download</th>
                     {canDelete && <th className="px-5 py-3 text-right font-medium">Action</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {data.versions.map((v) => {
+                  {sortedVersions.map((v) => {
                     const key = `${v.subdir}-${v.filename}`;
                     const isOpen = !!expanded[key];
-                    const colSpan = canDelete ? 6 : 5;
+                    const colSpan = canDelete ? 7 : 6;
                     return (
                       <Fragment key={key}>
                         <tr
@@ -167,6 +318,12 @@ export default function PackageDetail() {
                           </td>
                           <td className="px-5 py-3 align-baseline text-right tabular-nums text-slate-600 dark:text-slate-400">
                             {formatSize(v.size)}
+                          </td>
+                          <td
+                            className="whitespace-nowrap px-5 py-3 align-baseline tabular-nums text-slate-600 dark:text-slate-400"
+                            title={v.created_at ? new Date(v.created_at).toLocaleString() : undefined}
+                          >
+                            {formatDate(v.created_at)}
                           </td>
                           <td className="px-5 py-3 align-baseline">
                             <a

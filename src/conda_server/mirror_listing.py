@@ -19,9 +19,11 @@ client will fetch whatever it needs directly anyway.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from conda_server.models import Channel
 from conda_server.storage import Storage
+from conda_server.versions import sort_versions
 
 _KNOWN_SUBDIRS = (
     "noarch",
@@ -43,6 +45,11 @@ class _PackageVersion:
     filename: str
     size: int | None = None
     sha256: str | None = None
+    # When the bytes landed in *our* cache, from the storage object's
+    # last-modified. Mirror channels have no PackageVersion row, so this
+    # is the only "added on" signal available; it's what the package
+    # page's Added column shows for these channels.
+    created_at: datetime | None = None
 
 
 @dataclass
@@ -111,11 +118,18 @@ async def cached_packages(storage: Storage, channel: Channel) -> list[_Package]:
                 subdir=subdir,
                 filename=filename,
                 size=meta.size,
+                created_at=(
+                    datetime.fromtimestamp(meta.last_modified, tz=UTC)
+                    if meta.last_modified is not None
+                    else None
+                ),
             )
         )
 
     for pkg in merged.values():
-        pkg.versions.sort(key=lambda v: (v.version, v.build, v.subdir))
+        # Newest version first, via conda's ordering rules — a plain
+        # string sort puts 0.10.0 before 0.9.0.
+        pkg.versions[:] = sort_versions(pkg.versions)
 
     return sorted(merged.values(), key=lambda p: p.name)
 

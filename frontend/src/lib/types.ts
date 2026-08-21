@@ -52,6 +52,16 @@ export interface PackageVersion {
   // Set when this version landed via the import-from-upstream flow;
   // null for plain admin uploads.
   imported_from?: string | null;
+  // ISO timestamp for when the artifact landed on this server — not
+  // when it was built (that's `timestamp`). For mirror channels it's
+  // the storage object's last-modified. Null when neither is known.
+  created_at?: string | null;
+  // Dense rank of this version within the package, 0 = newest, shared
+  // by every build of the same version. The server computes it with
+  // conda's real ordering rules (epochs, .post/.dev, 2.31 == 2.31.0),
+  // so sorting the table by version is a numeric compare on this rather
+  // than a reimplementation of those rules in the browser.
+  version_order?: number;
 }
 
 export interface UpstreamPackageHit {
