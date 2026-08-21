@@ -2,6 +2,44 @@
 
 
 
+## v0.5.0 (2026-08-21)
+
+### Chore
+
+* chore: satisfy ruff format + UP017 in recent-uploads test
+
+ruff format wants single-space inline comments, and UP017 prefers the
+datetime.UTC alias over datetime.timezone.utc.
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_013XewjLYVb35vQqLdWmamkq ([`93a9825`](https://github.com/Krande/conda-server/commit/93a9825e03281e059711ba3db433c401042a24fa))
+
+### Feature
+
+* feat: replace redundant channels card with recent uploads on home
+
+The bottom-left home card duplicated what the &#34;Browse channels&#34; button
+and the channel-count stat row already convey. Replace it with a
+&#34;Recently uploaded&#34; card that surfaces the newest package uploads with a
+relative &#34;time since upload&#34; (minutes/hours/days, falling back to the
+calendar date once older than a week).
+
+Backend: new GET /api/search/recent endpoint returns the most recently
+uploaded package versions across visible channels, ordered by server-side
+created_at, deduped to one entry per (channel, package), respecting the
+same ACL as search and excluding mirror channels (which have no
+PackageVersion rows).
+
+Co-Authored-By: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_013XewjLYVb35vQqLdWmamkq ([`eb7b5c7`](https://github.com/Krande/conda-server/commit/eb7b5c71d008b10a58d9347eea6f093d8abea5d1))
+
+### Unknown
+
+* Merge pull request #11 from Krande/feat/home-recent-uploads
+
+feat: show recent package uploads on the home page ([`fe73d0a`](https://github.com/Krande/conda-server/commit/fe73d0a250ab91ad9e313779c2789dc3ac3ee97d))
+
+
 ## v0.4.0 (2026-08-20)
 
 ### Feature
