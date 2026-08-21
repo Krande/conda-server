@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Annotated
+from collections.abc import Iterable
+from datetime import datetime
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -12,6 +14,7 @@ from conda_server.db import SessionDep
 from conda_server.mirror_listing import cached_package, cached_packages
 from conda_server.models import Channel, Package, PackageVersion, User
 from conda_server.storage import get_storage
+from conda_server.versions import sort_versions, version_ranks
 
 router = APIRouter(prefix="/channels/{channel_name}/packages", tags=["packages"])
 
@@ -39,6 +42,15 @@ class PackageVersionOut(BaseModel):
     # Set when this version was pulled in via the import-from-upstream
     # flow; null for plain admin uploads.
     imported_from: str | None = None
+    # When the artifact landed on *this* server (not when it was built —
+    # that's ``timestamp``). For mirror channels there's no row to read,
+    # so it's the storage object's last-modified instead. Null when
+    # neither is available.
+    created_at: datetime | None = None
+    # Dense rank of this artifact's version within the package, 0 =
+    # newest. Lets the UI re-sort by version without reimplementing
+    # conda's ordering rules in the browser; see conda_server.versions.
+    version_order: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -49,14 +61,19 @@ class PackageOut(BaseModel):
     versions: list[PackageVersionOut]
 
 
-def _version_out(v: PackageVersion) -> PackageVersionOut:
-    """Flatten a PackageVersion row to the outbound shape.
+def _version_out(v: Any, version_order: int) -> PackageVersionOut:
+    """Flatten a package-version row to the outbound shape.
+
+    Takes ``Any`` rather than ``PackageVersion`` because mirror channels
+    have no DB rows — the listing hands us a filename-derived dataclass
+    with the same core attributes but none of the repodata extras. The
+    ``getattr`` defaults are what bridge the two.
 
     ``depends`` / ``constrains`` live on dedicated columns; ``license``
     and ``timestamp`` live inside the repodata ``info`` JSON blob, so we
     pull them out here rather than bolt a reflection layer onto the ORM.
     """
-    info = v.info or {}
+    info = getattr(v, "info", None) or {}
     return PackageVersionOut(
         version=v.version,
         build=v.build,
@@ -65,20 +82,38 @@ def _version_out(v: PackageVersion) -> PackageVersionOut:
         filename=v.filename,
         size=v.size,
         sha256=v.sha256,
-        md5=v.md5,
-        depends=list(v.depends or []),
-        constrains=list(v.constrains or []),
+        md5=getattr(v, "md5", None),
+        depends=list(getattr(v, "depends", None) or []),
+        constrains=list(getattr(v, "constrains", None) or []),
         license=info.get("license") if isinstance(info, dict) else None,
         timestamp=info.get("timestamp") if isinstance(info, dict) else None,
-        imported_from=v.imported_from,
+        imported_from=getattr(v, "imported_from", None),
+        created_at=getattr(v, "created_at", None),
+        version_order=version_order,
     )
+
+
+def _versions_out(versions: Iterable[Any]) -> list[PackageVersionOut]:
+    """Order artifacts newest-version-first and tag each with its rank.
+
+    Sorting here rather than in SQL is deliberate: conda version order
+    isn't expressible as an ORDER BY (it needs segment-wise numeric
+    comparison plus epoch/post/dev rules), and the endpoint already
+    materialises every version of the package to serialize it, so there
+    is nothing extra to fetch. The expensive case — a channel with tens
+    of thousands of *packages* — is bounded by the per-package version
+    count, not the channel size.
+    """
+    ordered = sort_versions(list(versions))
+    ranks = version_ranks(ordered)
+    return [_version_out(v, rank) for v, rank in zip(ordered, ranks, strict=True)]
 
 
 def _package_out(pkg: Package) -> PackageOut:
     return PackageOut(
         name=pkg.name,
         description=pkg.description,
-        versions=[_version_out(v) for v in pkg.versions],
+        versions=_versions_out(pkg.versions),
     )
 
 
@@ -117,9 +152,7 @@ async def get_package(
         return PackageOut(
             name=pkg.name,
             description=pkg.description,
-            versions=[
-                PackageVersionOut.model_validate(v, from_attributes=True) for v in pkg.versions
-            ],
+            versions=_versions_out(pkg.versions),
         )
 
     result = await session.execute(
@@ -139,9 +172,7 @@ async def _mirror_package_list(channel: Channel) -> list[PackageOut]:
         PackageOut(
             name=pkg.name,
             description=pkg.description,
-            versions=[
-                PackageVersionOut.model_validate(v, from_attributes=True) for v in pkg.versions
-            ],
+            versions=_versions_out(pkg.versions),
         )
         for pkg in raw
     ]
