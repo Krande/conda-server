@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from conda_server.db import get_sessionmaker
-from conda_server.models import Channel, ChannelMember, Package, User
+from conda_server.models import (
+    Channel,
+    ChannelMember,
+    Package,
+    PackageVersion,
+    User,
+)
 from tests.conftest import make_session_cookie
 
 
@@ -172,6 +180,111 @@ async def test_resolve_caps_input_length(app, client):
     resp = await client.get(f"/api/search/resolve?names={','.join(names)}")
     assert resp.status_code == 200
     assert resp.json().get("numpy") == {"channel": "pub"}
+
+
+async def _seed_recent() -> dict[str, int]:
+    """Public + private channels each with versioned packages at known
+    upload times, plus a mirror channel that shouldn't surface.
+
+    Upload times (created_at) descend so ordering is deterministic:
+    pub/alpha 2.0 (newest) > pub/alpha 1.0 > pub/beta 1.0 >
+    secret/gamma 1.0 (oldest).
+    """
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    sm = get_sessionmaker()
+    async with sm() as session:
+        pub = Channel(name="pub", storage_prefix="pub", private=False)
+        priv = Channel(name="secret", storage_prefix="secret", private=True)
+        mir = Channel(
+            name="cf-mirror",
+            storage_prefix="cf-mirror",
+            private=False,
+            mirror_url="https://conda.anaconda.org/conda-forge",
+        )
+        session.add_all([pub, priv, mir])
+        await session.flush()
+
+        alpha = Package(channel_id=pub.id, name="alpha")
+        beta = Package(channel_id=pub.id, name="beta")
+        gamma = Package(channel_id=priv.id, name="gamma")
+        # A mirror channel with a Package row + version — must be excluded.
+        delta = Package(channel_id=mir.id, name="delta")
+        session.add_all([alpha, beta, gamma, delta])
+        await session.flush()
+
+        def _ver(pkg_id: int, version: str, minutes_ago: int) -> PackageVersion:
+            return PackageVersion(
+                package_id=pkg_id,
+                version=version,
+                build="0",
+                build_number=0,
+                subdir="noarch",
+                filename=f"{version}-0.conda",
+                created_at=base - timedelta(minutes=minutes_ago),
+            )
+
+        session.add_all(
+            [
+                _ver(alpha.id, "2.0", 1),  # newest
+                _ver(alpha.id, "1.0", 5),  # same package, older
+                _ver(beta.id, "1.0", 10),
+                _ver(gamma.id, "1.0", 20),  # oldest, private
+                _ver(delta.id, "1.0", 0),  # mirror — newest of all, excluded
+            ]
+        )
+        await session.commit()
+        return {"pub": pub.id, "priv": priv.id, "mir": mir.id}
+
+
+@pytest.mark.asyncio
+async def test_recent_anon_sees_public_newest_first_deduped(app, client):
+    await _seed_recent()
+    resp = await client.get("/api/search/recent")
+    assert resp.status_code == 200
+    rows = resp.json()
+    # Mirror (delta) excluded; private (gamma) hidden from anon; alpha
+    # deduped to its newest version (2.0). Newest-first ordering.
+    assert [(r["name"], r["channel"], r["version"]) for r in rows] == [
+        ("alpha", "pub", "2.0"),
+        ("beta", "pub", "1.0"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recent_member_sees_private(app, client):
+    ids = await _seed_recent()
+    sm = get_sessionmaker()
+    async with sm() as session:
+        user = User(subject="rm", email="rm@x", username="rm", role="user")
+        session.add(user)
+        await session.flush()
+        session.add(ChannelMember(channel_id=ids["priv"], user_id=user.id, role="reader"))
+        await session.commit()
+
+    resp = await client.get(
+        "/api/search/recent",
+        cookies={"session": make_session_cookie("rm")},
+    )
+    names = [(r["name"], r["channel"]) for r in resp.json()]
+    assert ("gamma", "secret") in names
+    assert ("delta", "cf-mirror") not in names  # mirror still excluded
+
+
+@pytest.mark.asyncio
+async def test_recent_respects_limit(app, client):
+    await _seed_recent()
+    resp = await client.get("/api/search/recent?limit=1")
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "alpha"  # the single newest distinct package
+
+
+@pytest.mark.asyncio
+async def test_recent_empty_when_no_uploads(app, client):
+    await _seed_world()  # packages but no PackageVersion rows
+    resp = await client.get("/api/search/recent")
+    assert resp.status_code == 200
+    assert resp.json() == []
 
 
 @pytest.mark.asyncio

@@ -188,6 +188,15 @@ export interface ResolveResult {
   [name: string]: { channel: string };
 }
 
+export interface RecentUpload {
+  name: string;
+  channel: string;
+  version: string;
+  subdir: string;
+  // Server-side upload time (ISO 8601); null for legacy rows without one.
+  created_at: string | null;
+}
+
 export interface PreviewItem {
   name: string;
   version: string;
@@ -212,6 +221,8 @@ export const search = {
       { signal },
     );
   },
+  recent: (limit = 5, signal?: AbortSignal) =>
+    api<RecentUpload[]>(`/search/recent?limit=${limit}`, { signal }),
 };
 
 export interface AuditQuery {
