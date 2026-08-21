@@ -1,8 +1,8 @@
 name: Lint
 
 # Runs the pinned ruff formatter check + linter (the `lint` pixi environment,
-# see pixi.toml / action_config.toml). Independent of the other CI workflows so
-# it reports its own required status check.
+# see pixi.toml). Independent of the other CI workflows so it reports its own
+# required status check.
 on:
   pull_request:
     branches: [main, develop]
