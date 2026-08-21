@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -190,7 +190,7 @@ async def _seed_recent() -> dict[str, int]:
     pub/alpha 2.0 (newest) > pub/alpha 1.0 > pub/beta 1.0 >
     secret/gamma 1.0 (oldest).
     """
-    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
     sm = get_sessionmaker()
     async with sm() as session:
         pub = Channel(name="pub", storage_prefix="pub", private=False)
@@ -225,11 +225,11 @@ async def _seed_recent() -> dict[str, int]:
 
         session.add_all(
             [
-                _ver(alpha.id, "2.0", 1),   # newest
-                _ver(alpha.id, "1.0", 5),   # same package, older
+                _ver(alpha.id, "2.0", 1),  # newest
+                _ver(alpha.id, "1.0", 5),  # same package, older
                 _ver(beta.id, "1.0", 10),
                 _ver(gamma.id, "1.0", 20),  # oldest, private
-                _ver(delta.id, "1.0", 0),   # mirror — newest of all, excluded
+                _ver(delta.id, "1.0", 0),  # mirror — newest of all, excluded
             ]
         )
         await session.commit()
