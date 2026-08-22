@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -191,6 +192,26 @@ class PackageVersion(Base):
     # rows). Plain string, no FK — we don't model "upstream channels"
     # as first-class entities.
     imported_from: Mapped[str | None] = mapped_column(String(1024))
+    # --- info/about.json --------------------------------------------------
+    # Human-facing metadata, read out of the archive rather than out of
+    # repodata (repodata is built from info/index.json, which carries none
+    # of it). These live on the *version* because that is where the data
+    # is: every artifact ships its own about.json and a project can move
+    # its docs between releases. The package page collapses them to one
+    # value per package at read time; see conda_server.api.packages.
+    # Every field is nullable — about.json is optional in a conda archive
+    # and frequently partial.
+    doc_url: Mapped[str | None] = mapped_column(String(1024))
+    home: Mapped[str | None] = mapped_column(String(1024))
+    dev_url: Mapped[str | None] = mapped_column(String(1024))
+    summary: Mapped[str | None] = mapped_column(String(2048))
+    description: Mapped[str | None] = mapped_column(Text)
+    # When extraction was last *attempted* for this row — set whether or
+    # not anything was found. Distinguishes "this archive has no
+    # about.json" from "nobody has looked yet", which is what stops the
+    # backfill command from re-downloading metadata-less archives on every
+    # run.
+    about_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     package: Mapped[Package] = relationship(back_populates="versions")

@@ -49,13 +49,32 @@ A modern, general-purpose conda server built on the [rattler](https://github.com
 5. `rattler-index` regenerates `repodata.json` + `repodata.json.zst` + `current_repodata.json`, uploaded back to storage.
 6. `Channel.repodata_updated_at` bumped to invalidate caches.
 
+#### Package metadata (`info/about.json`)
+
+`repodata.json` is built from `info/index.json` and carries none of the
+human-facing metadata a package page wants — documentation URL, homepage,
+repository, summary, description. Those live in a different archive member,
+`info/about.json`, so they have to be read from the artifact itself.
+
+Cost bound: the indexer opens an archive **only** for a version it just added
+or whose bytes just changed. A reindex of an unchanged channel therefore reads
+zero archives, and the steady-state cost is one archive read per newly indexed
+artifact rather than one per artifact in the channel. Archives above
+`indexer.MAX_ABOUT_ARCHIVE_BYTES` are skipped outright. The import-from-upstream
+path reads its own metadata from the copy already spooled to `/tmp`, so it costs
+no extra fetch at all.
+
+That bound means rows indexed before this existed stay blank; run
+`conda-server backfill-about <channel>` to open the archives already in storage.
+It is resumable and stamps every row it inspects, so re-runs skip them.
+
 ## Data model (initial)
 
 - `User` — id, subject (OIDC), email, role
 - `ApiKey` — user_id, key_hash, description, expires_at
 - `Channel` — name, description, private, storage_prefix, repodata_updated_at
 - `Package` — channel_id, name, description
-- `PackageVersion` — package_id, version, build, build_number, subdir, filename, sha256, md5, size, depends (json), constrains (json), timestamp
+- `PackageVersion` — package_id, version, build, build_number, subdir, filename, sha256, md5, size, depends (json), constrains (json), timestamp, plus the `info/about.json` fields (doc_url, home, dev_url, summary, description) and the `about_fetched_at` stamp
 
 Since implemented (beyond this initial cut): per-channel member ACLs,
 mirror/import-from-upstream channels, upload quotas, and an audit log —
@@ -72,7 +91,8 @@ src/conda_server/
   storage.py        obstore wrapper
   indexer.py        py-rattler + rattler-index
   auth.py           authlib OIDC + bearer tokens
-  cli.py            Typer CLI (serve / reindex / migrate)
+  cli.py            Typer CLI (serve / reindex / migrate / backfill-about)
+  package_about.py  info/about.json extraction from .conda / .tar.bz2
   logging.py        structlog setup
   api/              routers (health, channels, repodata, packages, auth)
   migrations/       alembic

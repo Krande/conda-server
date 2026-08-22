@@ -207,6 +207,24 @@ export default function PackageDetail() {
   const toggle = (key: string) =>
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
 
+  // about.json splits the prose in two: a one-line `summary` and a
+  // free-form `description` that can run to a whole README. Lead with
+  // whichever short one exists, and only repeat the long form below when
+  // it actually says something the summary didn't.
+  const lead = data.summary ?? data.description;
+  const longDescription =
+    data.description && data.description !== lead ? data.description : null;
+
+  // Recipes fill in whichever of these they care about and leave the rest
+  // out, so the list is built from what's actually present — a package
+  // with no doc_url renders no Documentation button at all rather than a
+  // disabled one or a link to nowhere.
+  const metaLinks = [
+    { label: "Documentation", href: data.doc_url },
+    { label: "Homepage", href: data.home },
+    { label: "Repository", href: data.dev_url },
+  ].filter((link): link is { label: string; href: string } => Boolean(link.href));
+
   // Clicking the active column reverses it; clicking a new one starts
   // from that column's natural direction.
   const handleSort = (key: SortKey) =>
@@ -232,10 +250,33 @@ export default function PackageDetail() {
         <h1 className="mt-2 text-2xl font-semibold tracking-tight">{data.name}</h1>
       </div>
 
-      {data.description && (
+      {lead && (
         <p className="max-w-3xl text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-          {data.description}
+          {lead}
         </p>
+      )}
+
+      {longDescription && (
+        <p className="max-w-3xl whitespace-pre-line text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+          {longDescription}
+        </p>
+      )}
+
+      {metaLinks.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {metaLinks.map((link) => (
+            <a
+              key={link.label}
+              href={link.href}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-900 transition-colors hover:bg-slate-200 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700"
+            >
+              {link.label}
+              <span aria-hidden="true">&#8599;</span>
+            </a>
+          ))}
+        </div>
       )}
 
       <section>

@@ -10,12 +10,20 @@ uploading the generated repodata artifacts back.
 After indexing, the generated ``repodata.json`` is parsed and the rows in the
 ``packages`` / ``package_versions`` tables are brought in sync — added,
 updated, or deleted. The DB is a cache of the authoritative files on storage.
+
+One field group does *not* come from repodata: the ``info/about.json``
+metadata (docs URL, homepage, repository, summary, description). repodata is
+built from ``info/index.json`` and carries none of it, so it has to come out
+of the archive itself — see ``_capture_about`` for the cost bound that keeps
+that from turning every reindex into a full channel download.
 """
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
+import os
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -29,9 +37,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from conda_server.config import StorageSettings, get_settings, resolve_path
 from conda_server.logging import get_logger
 from conda_server.models import Channel, Package, PackageVersion
+from conda_server.package_about import PackageAbout, read_package_about
 from conda_server.storage import Storage
 
 log = get_logger(__name__)
+
+
+#: Archives larger than this are not opened for ``about.json``. Reading
+#: the member means pulling the object out of storage first, and a docs
+#: link is not worth streaming a multi-gigabyte artifact. Rows skipped
+#: this way are still marked as attempted so the backfill command does
+#: not keep retrying them.
+MAX_ABOUT_ARCHIVE_BYTES = 512 * 1024 * 1024
 
 
 SUBDIRS = (
@@ -192,10 +209,16 @@ async def _sync_db_from_repodata(
 
                 existing_row = existing.get((subdir, filename))
                 if existing_row is None:
-                    session.add(_build_version(pkg.id, subdir, filename, info))
+                    row = _build_version(pkg.id, subdir, filename, info)
+                    session.add(row)
+                    await _capture_about(storage, prefix, row)
                     added += 1
                 elif _version_changed(existing_row, info):
+                    recapture = _should_recapture_about(existing_row, info)
                     _apply_version(existing_row, subdir, filename, info)
+                    if recapture:
+                        existing_row.about_fetched_at = None
+                        await _capture_about(storage, prefix, existing_row)
                     updated += 1
 
     for orphan_key, orphan_row in existing.items():
@@ -258,6 +281,101 @@ def _apply_version(row: PackageVersion, subdir: str, filename: str, info: dict[s
 
 def _version_changed(row: PackageVersion, info: dict[str, Any]) -> bool:
     return row.sha256 != info.get("sha256") or row.size != info.get("size")
+
+
+def _should_recapture_about(row: PackageVersion, info: dict[str, Any]) -> bool:
+    """Whether a *changed* row's about.json is worth re-reading.
+
+    Two cases qualify, and one common one deliberately doesn't:
+
+    * Never looked (``about_fetched_at`` is null) — includes every row
+      that predates this column, so a channel picks its metadata up as
+      artifacts churn without a dedicated pass.
+    * The bytes were genuinely replaced: a known sha256 changed to a
+      different known sha256, so the recipe (and its docs URL) may have
+      moved.
+
+    The excluded case is the row the import-from-upstream path just
+    created inline. It already carries metadata read from the /tmp copy
+    but no sha256, so the first reindex after it lands always looks
+    "changed" — re-opening the archive there would fetch the whole
+    artifact back out of storage to learn what we already know.
+    """
+    if row.about_fetched_at is None:
+        return True
+    new_sha = info.get("sha256")
+    return row.sha256 is not None and new_sha is not None and row.sha256 != new_sha
+
+
+def apply_about(row: PackageVersion, about: PackageAbout) -> None:
+    """Copy an extracted ``about.json`` onto a version row and stamp it.
+
+    ``about_fetched_at`` is set even for an empty result — that is the
+    difference between "this archive has no about.json" and "nobody has
+    looked yet", and it is what lets the backfill command skip archives
+    it has already opened instead of re-downloading them every run.
+    """
+    row.doc_url = about.doc_url
+    row.home = about.home
+    row.dev_url = about.dev_url
+    row.summary = about.summary
+    row.description = about.description
+    row.about_fetched_at = datetime.now(UTC)
+
+
+async def capture_about(
+    storage: Storage,
+    prefix: str,
+    row: PackageVersion,
+) -> bool:
+    """Read one artifact's ``about.json`` from storage onto its row.
+
+    Returns True when the row was stamped (whether or not any metadata
+    was found), False when the archive could not be fetched at all —
+    those are left unstamped deliberately, so a transient storage error
+    is retried on the next pass rather than remembered as "this package
+    has no metadata".
+
+    Oversized archives *are* stamped: the size cap is a policy decision,
+    not a transient failure, and retrying would re-read the same object
+    forever.
+    """
+    if row.size is not None and row.size > MAX_ABOUT_ARCHIVE_BYTES:
+        log.debug("about.skipped_oversized", filename=row.filename, size=row.size)
+        apply_about(row, PackageAbout.empty())
+        return True
+
+    key = f"{prefix}/{row.subdir}/{row.filename}"
+    suffix = ".conda" if row.filename.endswith(".conda") else ".tar.bz2"
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    try:
+        try:
+            with os.fdopen(fd, "wb") as tmp:
+                async for chunk in storage.stream(key):
+                    tmp.write(chunk)
+        except Exception as exc:
+            log.debug("about.fetch_failed", key=key, error=str(exc))
+            return False
+
+        apply_about(row, read_package_about(tmp_path))
+        return True
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+
+
+async def _capture_about(storage: Storage, prefix: str, row: PackageVersion) -> None:
+    """Best-effort ``about.json`` capture during a reindex.
+
+    Deliberately only reached for rows the sync just *added* or whose
+    bytes just *changed*. An untouched row is never re-opened, so a
+    steady-state reindex of an unchanged channel still downloads exactly
+    zero archives — the cost added here is one archive read per newly
+    indexed artifact, not one per artifact in the channel. That also
+    means existing rows stay blank until they are re-uploaded or the
+    ``conda-server backfill-about`` command is run against the channel.
+    """
+    await capture_about(storage, prefix, row)
 
 
 def _timestamp_from_ms(ts: int | float) -> datetime:
