@@ -21,6 +21,7 @@ from sqlalchemy import func, select
 from conda_server.auth import current_user_optional, visible_channels_stmt
 from conda_server.db import SessionDep
 from conda_server.models import Channel, Package, PackageVersion, User
+from conda_server.versions import sort_versions
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -96,54 +97,93 @@ async def recent_uploads(
     user: Annotated[User | None, Depends(current_user_optional)],
     limit: int = Query(_DEFAULT_RECENT_LIMIT, ge=1, le=_MAX_RECENT_LIMIT),
 ) -> list[dict[str, Any]]:
-    """Most recently uploaded package versions across visible channels.
+    """Packages with the most recent upload activity, one row per package.
 
-    Ordered by the server-side ``created_at`` (when the version landed
-    here, not the upstream build timestamp), newest first, deduped to one
-    entry per (channel, package) so a burst of version uploads for the
-    same package doesn't crowd out everything else. Mirror channels have
-    no ``PackageVersion`` rows — their listing is derived from storage —
-    so they naturally don't appear here.
+    Two separate questions live in this endpoint, and conflating them was
+    a bug:
+
+    *Which* packages appear, and in what order, is a recency question —
+    ranked by the newest ``created_at`` among the package's versions
+    (when a version landed *here*, not the upstream build timestamp).
+
+    *Which version* each row advertises is a version-ordering question,
+    and it has to be answered the same way the channel listing and the
+    package page answer it: the newest version by conda ordering (see
+    ``conda_server.versions``), not whichever row happens to have the
+    latest ``created_at``. Those two can disagree — an older version can
+    land after a newer one, e.g. when a recipe moves to ``noarch`` and a
+    build on the pre-bump merge commit republishes 2.4.0 as a noarch
+    artifact hours after 2.4.1 already shipped. Picking by ``created_at``
+    then advertised 2.4.0 as the package's version while every other
+    view said 2.4.1.
+
+    The timestamp reported is the displayed version's own ``created_at``,
+    so the row describes exactly one artifact rather than pairing one
+    version's number with another's upload time.
+
+    Mirror channels have no ``PackageVersion`` rows — their listing is
+    derived from storage — so they naturally don't appear here.
     """
     visible = visible_channels_stmt(user).subquery()
 
-    # Over-fetch so post-dedupe we still have `limit` distinct packages.
-    # A factor of 4 comfortably covers a channel pushing several builds of
-    # one package back-to-back without a second round-trip.
-    result = await session.execute(
+    # Rank packages in SQL so the limit is exact and the ordering is
+    # deterministic. ``Package.id`` breaks created_at ties, which are real:
+    # a batch import stamps every row it creates with the same timestamp,
+    # and without a tiebreak the winner was whatever order the DB returned.
+    recency = (
         select(
+            Package.id.label("package_id"),
             Package.name.label("name"),
             visible.c.name.label("channel"),
-            PackageVersion.version.label("version"),
-            PackageVersion.subdir.label("subdir"),
-            PackageVersion.created_at.label("created_at"),
+            func.max(PackageVersion.created_at).label("last_upload"),
         )
         .join(Package, PackageVersion.package_id == Package.id)
         .join(visible, Package.channel_id == visible.c.id)
         .where(visible.c.mirror_url.is_(None))
-        .order_by(PackageVersion.created_at.desc())
-        .limit(limit * 4)
+        .group_by(Package.id, Package.name, visible.c.name)
+        .order_by(func.max(PackageVersion.created_at).desc(), Package.id.desc())
+        .limit(limit)
     )
+    ranked = (await session.execute(recency)).all()
+    if not ranked:
+        return []
+
+    # Second pass for the version each row shows. Only the already-limited
+    # set of packages is loaded (at most ``limit`` of them, capped at 50),
+    # so this stays bounded by per-package version count rather than by
+    # channel size — the same trade-off the package endpoints make, and for
+    # the same reason: conda ordering isn't expressible as an ORDER BY.
+    rows = (
+        (
+            await session.execute(
+                select(PackageVersion).where(
+                    PackageVersion.package_id.in_([r.package_id for r in ranked])
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_package: dict[int, list[PackageVersion]] = {}
+    for row in rows:
+        by_package.setdefault(row.package_id, []).append(row)
 
     out: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for row in result:
-        key = (row.channel, row.name)
-        if key in seen:
+    for entry in ranked:
+        versions = by_package.get(entry.package_id)
+        if not versions:  # pragma: no cover - group-by guarantees at least one
             continue
-        seen.add(key)
-        created: datetime | None = row.created_at
+        newest = sort_versions(versions)[0]
+        created: datetime | None = newest.created_at
         out.append(
             {
-                "name": row.name,
-                "channel": row.channel,
-                "version": row.version,
-                "subdir": row.subdir,
+                "name": entry.name,
+                "channel": entry.channel,
+                "version": newest.version,
+                "subdir": newest.subdir,
                 "created_at": created.isoformat() if created is not None else None,
             }
         )
-        if len(out) >= limit:
-            break
     return out
 
 
