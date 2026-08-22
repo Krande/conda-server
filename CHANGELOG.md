@@ -2,6 +2,47 @@
 
 
 
+## v0.6.0 (2026-08-22)
+
+### Feature
+
+* feat: drop the conda-forge link from the package header
+
+Every package with a detail page on this server is hosted *on this
+server*. Linking its header to anaconda.org/channels/conda-forge/
+packages/&lt;name&gt; was only ever right for mirrored public packages; for
+an internal package like structural-codecheck it points at a page for
+a package that isn&#39;t on conda-forge at all. anaconda.org answers 200
+for any name and renders an empty shell, so it doesn&#39;t even fail
+visibly — it just looks like the package exists upstream.
+
+The description moves out of the title block into a lead paragraph of
+its own, directly above the install commands, which is where a reader
+looking for &#34;what is this and how do I get it&#34; expects it.
+
+Dependency links keep their conda-forge fallback. That case is the
+opposite one: a dep this server doesn&#39;t host really does live on
+conda-forge, so pointing there is genuinely useful. Comment on
+condaForgeUrl now says which of the two it&#39;s for.
+
+Note that Package.description has no writer anywhere in the codebase
+today — the column exists and is always null — so this renders nothing
+until package metadata is actually captured. Reading info/about.json
+(which also carries doc_url/home, the natural source for a docs link)
+needs the archive bytes, and neither the upload path nor the indexer
+opens an archive for anything but index.json today. That&#39;s a separate
+change with its own cost trade-off, deliberately not bundled here.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01Mdyz12Wh4LQgzdAN1DYneo ([`587dec5`](https://github.com/Krande/conda-server/commit/587dec5299e05a330d676dbfcedbb100d7e45b78))
+
+### Unknown
+
+* Merge pull request #15 from Krande/feat/package-header-drop-conda-forge
+
+feat: drop the conda-forge link from the package header ([`7db9337`](https://github.com/Krande/conda-server/commit/7db93378e4783a390abf79d11ced2f1d16f12e4d))
+
+
 ## v0.5.1 (2026-08-21)
 
 ### Chore
