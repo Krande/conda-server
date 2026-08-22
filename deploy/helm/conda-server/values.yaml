@@ -220,7 +220,7 @@ bucketCors:
 # ---------------------------------------------------------------------
 blobCors:
   enabled: false
-  accountName: ""                 # Azure storage account, e.g. stdataaibelasaconda001
+  accountName: ""                 # Azure storage account, e.g. stcondaexample001
   allowedOrigin: ""               # https://conda.example.com (matches app.baseUrl)
   # Must ship the `az` CLI. The official azure-cli image works out of the
   # box and runs fine as a non-root UID (needs only a writable HOME).
