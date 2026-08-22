@@ -2,6 +2,80 @@
 
 
 
+## v0.6.1 (2026-08-22)
+
+### Chore
+
+* chore(helm): use a neutral storage-account example
+
+The blobCors.accountName comment carried a real-looking Azure storage account
+name as its example. This is a public repository, and an account name is more
+identifying than most placeholders -- Azure account names are globally unique,
+so a plausible one either names a real account or squats a namespace.
+
+Replaced with a neutral example, matching the convention the very next line
+already uses (allowedOrigin&#39;s `https://conda.example.com`). Comment only; no
+value or behaviour changes, and the field is still an empty default.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01Mdyz12Wh4LQgzdAN1DYneo ([`030d4c0`](https://github.com/Krande/conda-server/commit/030d4c0b330723d2d7b3ee77622d6f3aa94edc9a))
+
+### Fix
+
+* fix: show the newest version, not the newest row, in recent uploads
+
+The home page &#34;Recently uploaded&#34; panel could show an OLDER version than the
+channel listing and the package page, which both showed the newer one.
+
+GET /api/search/recent ordered PackageVersion rows by created_at DESC and kept
+the first row per (channel, package). That answers &#34;which artifact was uploaded
+most recently&#34;, not &#34;which version is newest&#34;. The two diverge whenever an
+older version is (re)published after a newer one has already shipped -- for
+example when a recipe moves from per-platform builds to `noarch: python` and a
+build runs on the merge commit before the version bump, so the same version
+exists as both a platform artifact and a noarch one, with the noarch republish
+landing last.
+
+Neither of the assumptions the old query relied on holds in practice:
+
+  * one artifact per version -- false for a noarch package that ships an
+    __unix and a __win build of the same version, conda&#39;s standard pattern for
+    platform-gated dependencies;
+  * one subdir per version -- false during a per-platform to noarch migration.
+
+The fix:
+
+  * /search/recent picks the displayed version with sort_versions, so the panel,
+    the channel listing and the package endpoint agree by construction rather
+    than by coincidence.
+  * Package ranking moves into SQL as a grouped max(created_at) with a
+    Package.id tiebreak, replacing an over-fetch of limit * 4 rows filtered in
+    Python. That also removes a real source of nondeterminism: rows sharing an
+    identical created_at (a batch import, say) had no secondary ordering, so the
+    winner was whatever the database happened to return.
+  * The reported timestamp is the displayed version&#39;s own created_at, so a row
+    describes one artifact instead of pairing one version&#39;s number with a
+    different version&#39;s upload time.
+
+This is a gap in the 0.5.x version-ordering work rather than a regression from
+it: that change routed the package page and the mirror listing through the
+shared version module but never touched api/search.py. The existing tests
+seeded data where newest-by-date and newest-by-version coincided, so they could
+not catch it.
+
+Four new tests, two of which fail before this change and pass after. They cover
+both shapes above plus a direct assertion that the panel and the package
+endpoint agree. ([`0894ae2`](https://github.com/Krande/conda-server/commit/0894ae2ad911cc22ab130bd7af64c7728225fcab))
+
+### Unknown
+
+* Merge pull request #14 from Krande/fix/recent-uploads-latest-version
+
+fix: show the newest version, not the newest row, in recent uploads ([`4c932f3`](https://github.com/Krande/conda-server/commit/4c932f37e9fad2e94cb6e8535741be59125fdff1))
+
+* Merge branch &#39;main&#39; into fix/recent-uploads-latest-version ([`e95715d`](https://github.com/Krande/conda-server/commit/e95715d924df5923d805ec9be44af8dc4baf22b0))
+
+
 ## v0.6.0 (2026-08-22)
 
 ### Feature
