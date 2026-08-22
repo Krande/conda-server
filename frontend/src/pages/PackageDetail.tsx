@@ -161,6 +161,10 @@ function parseDepSpec(spec: string): { name: string; constraint: string } {
   return { name: match[1], constraint: match[2].trim() };
 }
 
+// Only used as the fallback target for *dependency* links: a dep this
+// server doesn't host (python, orjson, …) really does live on conda-forge,
+// so pointing there is useful. The package being viewed is by definition
+// hosted here, so its own header never links out — see the header below.
 const condaForgeUrl = (name: string) =>
   `https://anaconda.org/channels/conda-forge/packages/${encodeURIComponent(name)}/overview`;
 
@@ -225,21 +229,14 @@ export default function PackageDetail() {
         <Link to={`/channels/${channel}`} className="text-sm text-brand-700 hover:underline dark:text-brand-400">
           ← Back to {channel}
         </Link>
-        <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">{data.name}</h1>
-          <a
-            href={condaForgeUrl(data.name)}
-            target="_blank"
-            rel="noreferrer"
-            className="text-sm text-brand-700 hover:underline dark:text-brand-400"
-          >
-            View on conda-forge ↗
-          </a>
-        </div>
-        {data.description && (
-          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">{data.description}</p>
-        )}
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight">{data.name}</h1>
       </div>
+
+      {data.description && (
+        <p className="max-w-3xl text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+          {data.description}
+        </p>
+      )}
 
       <section>
         <h2 className="mb-3 text-lg font-semibold">Install</h2>
