@@ -10,9 +10,9 @@ from sqlalchemy import select
 from conda_server import __version__
 from conda_server.config import get_settings
 from conda_server.db import dispose_engine, get_sessionmaker
-from conda_server.indexer import reindex_channel
+from conda_server.indexer import capture_about, reindex_channel
 from conda_server.logging import configure_logging, get_logger
-from conda_server.models import Channel, ChannelMember, User
+from conda_server.models import Channel, ChannelMember, Package, PackageVersion, User
 from conda_server.storage import get_storage
 
 app = typer.Typer(add_completion=False, help="conda-server CLI")
@@ -72,6 +72,77 @@ async def _reindex(channel_name: str) -> None:
             f"[green]reindexed[/green] {outcome.channel}: "
             f"+{outcome.added} ~{outcome.updated} -{outcome.removed}"
         )
+    finally:
+        await dispose_engine()
+
+
+@app.command("backfill-about")
+def backfill_about(
+    channel_name: str = typer.Argument(..., help="Channel name to backfill"),
+    limit: int = typer.Option(
+        500, help="Maximum archives to open in one run. Re-run until it reports 0."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Re-read archives already inspected (e.g. after a parser fix)."
+    ),
+) -> None:
+    """Populate package metadata from archives already in storage.
+
+    Packages uploaded before metadata capture existed have no docs link,
+    homepage or description, and a plain reindex will not give them one:
+    the indexer only opens an archive for a version it just added or
+    whose bytes just changed, precisely so a routine reindex stays free.
+    This command is the deliberate, operator-triggered pass that opens
+    the rest.
+
+    It is resumable and safe to re-run — every row it inspects is stamped
+    whether or not the archive had an ``about.json``, so a second run
+    skips them instead of re-downloading. ``--limit`` bounds one run's
+    egress; re-run until it reports nothing left.
+    """
+    asyncio.run(_backfill_about(channel_name, limit, force))
+
+
+async def _backfill_about(channel_name: str, limit: int, force: bool) -> None:
+    settings = get_settings()
+    configure_logging(settings.logging)
+    storage = get_storage()
+    sm = get_sessionmaker()
+    try:
+        async with sm() as session:
+            channel = await _resolve_channel(session, channel_name)
+            stmt = (
+                select(PackageVersion)
+                .join(Package, PackageVersion.package_id == Package.id)
+                .where(Package.channel_id == channel.id)
+                .order_by(PackageVersion.id)
+                .limit(limit)
+            )
+            if not force:
+                stmt = stmt.where(PackageVersion.about_fetched_at.is_(None))
+            rows = list((await session.execute(stmt)).scalars())
+            if not rows:
+                rprint(f"[green]nothing to backfill[/green] in {channel_name}")
+                return
+
+            prefix = channel.storage_prefix.strip("/")
+            inspected = failed = with_metadata = 0
+            for row in rows:
+                if await capture_about(storage, prefix, row):
+                    inspected += 1
+                    if row.doc_url or row.home or row.dev_url or row.summary or row.description:
+                        with_metadata += 1
+                else:
+                    failed += 1
+            await session.commit()
+
+        rprint(
+            f"[green]backfilled[/green] {channel_name}: "
+            f"{inspected} archive(s) read, {with_metadata} with metadata, "
+            f"{failed} unreadable"
+        )
+        if len(rows) == limit:
+            rprint(f"[yellow]hit --limit {limit}[/yellow] — re-run to continue")
     finally:
         await dispose_engine()
 

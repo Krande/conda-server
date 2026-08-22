@@ -57,7 +57,19 @@ class PackageVersionOut(BaseModel):
 
 class PackageOut(BaseModel):
     name: str
+    # Long-form ``about.json`` description of the metadata-bearing
+    # version (see ``_about_source``), falling back to the operator-set
+    # ``Package.description`` column when the archives carry nothing.
     description: str | None
+    # One-line ``about.json`` summary. Separate from ``description``
+    # because they are separate recipe fields with different lengths —
+    # the page leads with the summary and keeps the description below it.
+    summary: str | None = None
+    # Links from the recipe. Null whenever the archive did not declare
+    # one; the page renders no button rather than an empty href.
+    doc_url: str | None = None
+    home: str | None = None
+    dev_url: str | None = None
     versions: list[PackageVersionOut]
 
 
@@ -93,27 +105,83 @@ def _version_out(v: Any, version_order: int) -> PackageVersionOut:
     )
 
 
-def _versions_out(versions: Iterable[Any]) -> list[PackageVersionOut]:
-    """Order artifacts newest-version-first and tag each with its rank.
+def _versions_out(ordered: list[Any]) -> list[PackageVersionOut]:
+    """Tag each already-ordered artifact with its dense version rank.
 
-    Sorting here rather than in SQL is deliberate: conda version order
-    isn't expressible as an ORDER BY (it needs segment-wise numeric
-    comparison plus epoch/post/dev rules), and the endpoint already
-    materialises every version of the package to serialize it, so there
-    is nothing extra to fetch. The expensive case — a channel with tens
-    of thousands of *packages* — is bounded by the per-package version
-    count, not the channel size.
+    Callers pass the output of ``sort_versions``. Sorting there rather
+    than in SQL is deliberate: conda version order isn't expressible as
+    an ORDER BY (it needs segment-wise numeric comparison plus
+    epoch/post/dev rules), and the endpoint already materialises every
+    version of the package to serialize it, so there is nothing extra to
+    fetch. The expensive case — a channel with tens of thousands of
+    *packages* — is bounded by the per-package version count, not the
+    channel size.
     """
-    ordered = sort_versions(list(versions))
     ranks = version_ranks(ordered)
     return [_version_out(v, rank) for v, rank in zip(ordered, ranks, strict=True)]
 
 
+#: Version-row attributes that carry ``about.json`` metadata. A row is a
+#: usable metadata source when at least one of them is set.
+_ABOUT_FIELDS = ("doc_url", "home", "dev_url", "summary", "description")
+
+
+def _about_source(ordered: list[Any]) -> Any | None:
+    """Pick the version whose ``about.json`` represents the package.
+
+    The archive stores this metadata per artifact, but the page shows one
+    docs link per package, so something has to decide which version wins.
+    It is the **newest version by conda ordering** — the same rule the
+    version table and the recent-uploads list already use — and
+    explicitly *not* the most recently uploaded row. Those two disagree
+    more often than they look like they would: a rebuild of an older
+    version can land after a newer one has already shipped, and ordering
+    by upload date would then advertise the older release's links as the
+    package's.
+
+    ``ordered`` is already newest-first, so this is a scan rather than a
+    second sort: the first version carrying any metadata wins. Versions
+    with nothing at all are skipped rather than winning and blanking the
+    page — which matters during rollout, when the newest version predates
+    metadata capture and an older one has been re-uploaded since. Showing
+    the older release's docs link beats showing none, and among versions
+    that *do* carry metadata conda ordering still decides, so this never
+    silently prefers a stale link over a fresh one.
+    """
+    for version in ordered:
+        if any(getattr(version, field, None) for field in _ABOUT_FIELDS):
+            return version
+    return None
+
+
 def _package_out(pkg: Package) -> PackageOut:
+    return _package_out_from(pkg.name, pkg.description, pkg.versions)
+
+
+def _package_out_from(
+    name: str,
+    fallback_description: str | None,
+    versions: Iterable[Any],
+) -> PackageOut:
+    """Build the outbound package shape, resolving about.json metadata.
+
+    Takes loose arguments rather than a ``Package`` because mirror
+    channels have no rows — their listing is a filename-derived dataclass
+    with no metadata columns, so ``_about_source`` finds nothing and every
+    link comes back null, which is correct: we never opened those
+    archives.
+    """
+    ordered = sort_versions(list(versions))
+    source = _about_source(ordered)
     return PackageOut(
-        name=pkg.name,
-        description=pkg.description,
-        versions=_versions_out(pkg.versions),
+        name=name,
+        description=(getattr(source, "description", None) if source else None)
+        or fallback_description,
+        summary=getattr(source, "summary", None) if source else None,
+        doc_url=getattr(source, "doc_url", None) if source else None,
+        home=getattr(source, "home", None) if source else None,
+        dev_url=getattr(source, "dev_url", None) if source else None,
+        versions=_versions_out(ordered),
     )
 
 
@@ -149,11 +217,7 @@ async def get_package(
         pkg = await cached_package(get_storage(), channel, name)
         if pkg is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="package not found")
-        return PackageOut(
-            name=pkg.name,
-            description=pkg.description,
-            versions=_versions_out(pkg.versions),
-        )
+        return _package_out_from(pkg.name, pkg.description, pkg.versions)
 
     result = await session.execute(
         select(Package)
@@ -168,14 +232,7 @@ async def get_package(
 
 async def _mirror_package_list(channel: Channel) -> list[PackageOut]:
     raw = await cached_packages(get_storage(), channel)
-    return [
-        PackageOut(
-            name=pkg.name,
-            description=pkg.description,
-            versions=_versions_out(pkg.versions),
-        )
-        for pkg in raw
-    ]
+    return [_package_out_from(pkg.name, pkg.description, pkg.versions) for pkg in raw]
 
 
 # Silence unused-import warning; PackageVersion is used indirectly via relationship.

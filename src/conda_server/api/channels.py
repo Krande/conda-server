@@ -37,7 +37,7 @@ from conda_server.auth import (
 )
 from conda_server.config import get_settings
 from conda_server.db import SessionDep, get_sessionmaker
-from conda_server.indexer import reindex_channel
+from conda_server.indexer import apply_about, reindex_channel
 from conda_server.logging import get_logger
 from conda_server.metrics import (
     PACKAGE_DELETES,
@@ -56,6 +56,7 @@ from conda_server.models import (
     PackageVersion,
     User,
 )
+from conda_server.package_about import read_package_about
 from conda_server.storage import get_storage
 
 router = APIRouter(prefix="/channels", tags=["channels"])
@@ -1390,6 +1391,14 @@ async def _import_one_package(
             info={"name": fn_name, "version": fn_version, "build": fn_build},
             imported_from=upstream_object_url,
         )
+        # The archive is already spooled to /tmp for the index.json read,
+        # so pulling info/about.json out of it costs one more seek into
+        # the same file — no second fetch, no storage round-trip. Stamping
+        # about_fetched_at here is also what stops the background reindex
+        # from re-downloading the artifact: this row has no sha256 yet, so
+        # the reindex will see it as "changed", and the stamp is how
+        # _should_recapture_about tells that apart from replaced bytes.
+        apply_about(version_row, read_package_about(tmp_path))
         session.add(version_row)
 
         UPLOADS_TOTAL.labels(channel=channel.name, subdir=subdir).inc()

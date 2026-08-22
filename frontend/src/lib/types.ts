@@ -102,7 +102,15 @@ export interface UpstreamVersionsResult {
 
 export interface Package {
   name: string;
+  // All five come from the newest metadata-bearing version's
+  // info/about.json; see _about_source in the packages API. Any of them
+  // may be null — about.json is optional in a conda archive and often
+  // only half filled in — so every consumer has to degrade gracefully.
   description: string | null;
+  summary: string | null;
+  doc_url: string | null;
+  home: string | null;
+  dev_url: string | null;
   versions: PackageVersion[];
 }
 
