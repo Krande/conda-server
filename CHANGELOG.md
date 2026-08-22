@@ -2,6 +2,76 @@
 
 
 
+## v0.7.0 (2026-08-22)
+
+### Feature
+
+* feat: read info/about.json so package pages can show links
+
+The package detail page had no documentation link, no repository link
+and no description, and could not have them: Package.description had no
+writer anywhere in the codebase and was always null, and nothing in the
+source referenced about.json at all.
+
+The reason is structural. doc_url, home, dev_url, summary and description
+live in a conda archive&#39;s info/about.json. This server only ever read
+info/index.json -- the repodata record -- which carries none of them, and
+rattler.AboutJson has no from_package_archive helper to make reading the
+other member a one-liner.
+
+New module package_about.py pulls the member out of both container
+formats. A .conda is a zip whose metadata sits in a single info-*.tar.zst
+entry, so the central directory lets us seek straight to a few KB and
+never touch the payload entry. A .tar.bz2 is one solid stream, so it
+decompresses forward and stops at the member. Parsing goes through
+rattler.AboutJson, which validates the URL fields -- a recipe that wrote
+a bare hostname yields nothing rather than an href the browser resolves
+as a relative path. about.json is optional and routinely partial, so
+every failure mode (member absent, unreadable archive, malformed JSON)
+resolves to &#34;no metadata&#34; and never to an exception.
+
+Stored on PackageVersion, not Package, because that is where the data
+is: every artifact ships its own about.json and a project can move its
+docs between releases. The page needs one value per package, so the API
+resolves it by conda version ordering -- the newest version that carries
+metadata wins, explicitly NOT the most recently uploaded row. Those two
+disagree when a rebuild of an older version lands after a newer one has
+shipped, which is the same trap that was just fixed in recent uploads;
+ordering by upload date there had advertised the older release. Versions
+carrying nothing are skipped rather than blanking the page, which is what
+makes the rollout period behave.
+
+Reindex cost is bounded deliberately. The indexer opens an archive only
+for a version it just added or whose bytes genuinely changed, so a
+reindex of an unchanged channel reads zero archives and the steady-state
+cost is one archive read per newly indexed artifact -- not one per
+artifact in the channel. Archives past a size cap are skipped but still
+stamped, and the import-from-upstream path reads its metadata from the
+copy already spooled to /tmp, costing no extra fetch at all.
+
+That bound means existing rows stay blank rather than being backfilled
+by a reindex, so backfill is explicit: conda-server backfill-about
+&lt;channel&gt; opens the archives already in storage. It is resumable and
+--limit bounds one run&#39;s egress, because every row it inspects is
+stamped with about_fetched_at whether or not the archive had an
+about.json -- which is also what stops metadata-less archives from being
+re-downloaded on every run.
+
+The page gains Documentation / Homepage / Repository buttons, each
+rendered only when the recipe declared that URL, and leads with the
+summary above the install commands (building on the lead paragraph added
+when the conda-forge header link was dropped).
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01Mdyz12Wh4LQgzdAN1DYneo ([`6c2dc13`](https://github.com/Krande/conda-server/commit/6c2dc13e103ff4d955d95a578b8710488541ec4e))
+
+### Unknown
+
+* Merge pull request #16 from Krande/feat/package-about-metadata
+
+feat: read info/about.json so package pages can show docs, homepage and repository links ([`d6f9e2d`](https://github.com/Krande/conda-server/commit/d6f9e2d3e2569d4695c302e644bd3ced061f8363))
+
+
 ## v0.6.1 (2026-08-22)
 
 ### Chore
