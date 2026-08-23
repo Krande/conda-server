@@ -2,6 +2,51 @@
 
 
 
+## v0.8.0 (2026-08-23)
+
+### Feature
+
+* feat: backfill info/about.json metadata for already-indexed versions (#17)
+
+The indexer only opens an archive for a version it just added or whose
+bytes just changed, which is what keeps a routine reindex from
+downloading the whole channel. The cost of that bound is that versions
+indexed before metadata capture existed stay blank forever: nothing
+about them ever changes, so nothing ever re-reads them, and their
+package pages show no documentation, homepage or repository link.
+
+Until now the only fix was remembering to run the backfill-about CLI
+command. Add the same pass as a mechanism the server offers:
+
+* A &#34;Backfill package metadata&#34; button on the channel admin page,
+  backed by a background job that reports real progress. The work is
+  one object-storage download per version and can run for minutes, so
+  a fire-and-forget &#34;queued, check the logs&#34; would be useless.
+* An opt-in trickle in the cleanup loop that opens a few archives per
+  channel per tick, so a deployment can heal without anyone pressing
+  anything. Off by default: unlike every other sweep it downloads
+  package archives, which costs bandwidth, and nobody should discover
+  that by upgrading.
+
+All three entry points share one runner, so they cannot drift, and the
+about_fetched_at stamp means they can never duplicate each other&#39;s
+work. Progress is now committed as it goes rather than once at the end,
+so an interrupted pass keeps the archives it already paid to download —
+previously a killed run discarded every stamp in the batch and the next
+run re-read all of it.
+
+Jobs are tracked in a new generic maintenance_jobs table rather than
+reusing import_jobs, which requires an upstream URL and would put the
+status endpoint under an import-shaped path. A partial index on the
+un-inspected rows keeps the driving query proportional to the work
+left rather than to the size of the channel.
+
+Concurrency defaults to 2: archives are spooled to local disk before
+their metadata member is read, so the limit is free disk rather than
+CPU or bandwidth, and containers often run with a modest
+ephemeral-storage allowance. ([`a5e020a`](https://github.com/Krande/conda-server/commit/a5e020a12583c392a0beed4f461b632721f63346))
+
+
 ## v0.7.0 (2026-08-22)
 
 ### Feature
