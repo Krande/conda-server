@@ -46,6 +46,7 @@ from conda_server.package_about import (
     read_package_about,
 )
 from conda_server.storage import Storage
+from conda_server.versions import sort_versions, version_ranks
 
 log = get_logger(__name__)
 
@@ -206,6 +207,12 @@ async def _sync_db_from_repodata(
     }
     seen: set[tuple[str, str]] = set()
     prefix = channel.storage_prefix.strip("/")
+    # Packages whose artifacts moved in this pass, and the specific rows
+    # whose bytes were replaced. Which of them are worth opening cannot
+    # be decided here: it depends on the package's full version list,
+    # which is not complete until every subdir has been read.
+    touched: set[int] = set()
+    replaced: set[PackageVersion] = set()
 
     for subdir in SUBDIRS:
         key = f"{prefix}/{subdir}/repodata.json"
@@ -225,14 +232,13 @@ async def _sync_db_from_repodata(
                 if existing_row is None:
                     row = _build_version(pkg.id, subdir, filename, info)
                     session.add(row)
-                    await _capture_about(storage, prefix, row)
+                    touched.add(pkg.id)
                     added += 1
                 elif _version_changed(existing_row, info):
-                    recapture = _should_recapture_about(existing_row, info)
+                    if _should_recapture_about(existing_row, info):
+                        replaced.add(existing_row)
+                        touched.add(pkg.id)
                     _apply_version(existing_row, subdir, filename, info)
-                    if recapture:
-                        existing_row.about_fetched_at = None
-                        await _capture_about(storage, prefix, existing_row)
                     updated += 1
 
     for orphan_key, orphan_row in existing.items():
@@ -240,6 +246,8 @@ async def _sync_db_from_repodata(
             await session.delete(orphan_row)
             removed += 1
 
+    await session.flush()
+    await _capture_about(session, storage, prefix, touched, replaced)
     await session.flush()
     return {"added": added, "updated": updated, "removed": removed}
 
@@ -434,18 +442,59 @@ async def _capture_about_spooled(storage: Storage, key: str, row: PackageVersion
             os.unlink(tmp_path)
 
 
-async def _capture_about(storage: Storage, prefix: str, row: PackageVersion) -> None:
-    """Best-effort ``about.json`` capture during a reindex.
+async def _capture_about(
+    session: AsyncSession,
+    storage: Storage,
+    prefix: str,
+    package_ids: set[int],
+    replaced: set[PackageVersion],
+) -> None:
+    """Best-effort ``about.json`` capture for the versions that are shown.
 
-    Deliberately only reached for rows the sync just *added* or whose
-    bytes just *changed*. An untouched row is never re-opened, so a
-    steady-state reindex of an unchanged channel still downloads exactly
-    zero archives — the cost added here is one archive read per newly
-    indexed artifact, not one per artifact in the channel. That also
-    means existing rows stay blank until they are re-uploaded or the
-    ``conda-server backfill-about`` command is run against the channel.
+    Two bounds, and they compose.
+
+    The first is *which packages*: only those whose artifacts moved in
+    this pass — something added, or bytes genuinely replaced. An untouched
+    package is never looked at, so a steady-state reindex of an unchanged
+    channel opens exactly zero archives.
+
+    The second is *which of their versions*: only the newest, because
+    that is the only one the package page can render. ``_about_source``
+    in the packages API picks the newest version by conda ordering, so
+    metadata captured for any older version is metadata nothing asks for.
+    A package usually has several versions in a channel, and capturing
+    every one of them multiplied this cost by exactly the factor of that
+    redundancy.
+
+    "Newest" is not fixed, which is why this runs against the package's
+    whole version list rather than against the rows the loop above
+    happened to touch: a rebuild of an older version can land *after* a
+    newer one shipped, and it must not be mistaken for the newest. The
+    flip side is handled by the same rule — when a genuinely new newest
+    version appears, its package is touched, the list is recomputed, and
+    it is captured on that pass.
+
+    Rows are still stamped whether or not the archive had an
+    ``about.json``, so nothing here is re-opened on the next pass.
+    Versions that are not the newest are left uninspected; filling those
+    in is what ``conda_server.backfill`` is for, and rows it fills are
+    what keeps ``_about_source``'s older-version fallback meaningful.
     """
-    await capture_about(storage, prefix, row)
+    for package_id in sorted(package_ids):
+        result = await session.execute(
+            select(PackageVersion).where(PackageVersion.package_id == package_id)
+        )
+        ordered = sort_versions(list(result.scalars()))
+        for row, rank in zip(ordered, version_ranks(ordered), strict=True):
+            # ``ordered`` is newest-first and ranks only ever increase, so
+            # the first non-zero rank ends the newest version's artifacts.
+            if rank != 0:
+                break
+            if row in replaced:
+                row.about_fetched_at = None
+            elif row.about_fetched_at is not None:
+                continue
+            await capture_about(storage, prefix, row)
 
 
 def _timestamp_from_ms(ts: int | float) -> datetime:

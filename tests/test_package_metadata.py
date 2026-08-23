@@ -572,3 +572,230 @@ async def test_replaced_bytes_trigger_a_fresh_read(app, tmp_path):
             assert row.doc_url == DOCS
     finally:
         storage_module.reset_storage()
+
+
+# --- indexer: which versions get opened at all -------------------------
+#
+# The page renders one version's metadata per package — the newest by
+# conda ordering, see ``_about_source`` — so capturing any other version
+# buys nothing. A channel typically holds several versions of every
+# package, and that multiple was exactly the waste.
+
+
+def _repodata_for(subdir: str, entries: dict[str, tuple[str, str, int]]) -> bytes:
+    """``{filename: (version, sha256, size)}`` as one subdir's repodata."""
+    return json.dumps(
+        {
+            "info": {"subdir": subdir},
+            "packages": {},
+            "packages.conda": {
+                filename: {
+                    "name": "pkg-a",
+                    "version": version,
+                    "build": "h0",
+                    "build_number": 0,
+                    "size": size,
+                    "sha256": sha256,
+                    "md5": "d" * 32,
+                    "depends": [],
+                    "constrains": [],
+                }
+                for filename, (version, sha256, size) in entries.items()
+            },
+            "repodata_version": 2,
+        }
+    ).encode()
+
+
+async def _publish(storage, specs: list[tuple[str, str, str]], name: str = "idx") -> None:
+    """Put one ``.conda`` per spec into storage and rewrite the repodata.
+
+    ``specs`` is ``(subdir, version, sha256)``. Rewriting the whole
+    repodata each time is what a real reindex sees, and it lets a test
+    change one artifact's sha256 to mean "these bytes were replaced".
+    """
+    by_subdir: dict[str, dict[str, tuple[str, str, int]]] = {}
+    for subdir, version, sha256 in specs:
+        filename = f"pkg-a-{version}-h0.conda"
+        blob = make_conda_blob(FULL_ABOUT)
+        await storage.put(f"{name}/{subdir}/{filename}", blob)
+        by_subdir.setdefault(subdir, {})[filename] = (version, sha256, len(blob))
+    for subdir, entries in by_subdir.items():
+        await storage.put(f"{name}/{subdir}/repodata.json", _repodata_for(subdir, entries))
+
+
+async def _channel_with(tmp_path, specs: list[tuple[str, str, str]]):
+    storage = _CountingStorage(build_storage(StorageSettings(backend="local", url=str(tmp_path))))
+    storage_module.set_storage(storage)
+    await _publish(storage, specs)
+
+    sm = get_sessionmaker()
+    async with sm() as session:
+        channel = Channel(name="idx", storage_prefix="idx")
+        session.add(channel)
+        await session.commit()
+        await session.refresh(channel)
+    return storage, channel
+
+
+async def _reindex(channel, storage) -> dict[str, int]:
+    sm = get_sessionmaker()
+    async with sm() as session:
+        chan = await session.get(Channel, channel.id)
+        stats = await _sync_db_from_repodata(session, storage, chan)
+        await session.commit()
+        return stats
+
+
+async def _rows_by_version() -> dict[str, list]:
+    sm = get_sessionmaker()
+    async with sm() as session:
+        rows = list((await session.execute(PackageVersion.__table__.select())).all())
+    grouped: dict[str, list] = {}
+    for row in rows:
+        grouped.setdefault(row.version, []).append(row)
+    return grouped
+
+
+@pytest.mark.asyncio
+async def test_only_the_newest_version_is_opened(app, tmp_path):
+    """Three versions land at once; one of them is worth reading."""
+    storage, channel = await _channel_with(
+        tmp_path,
+        [
+            ("linux-64", "1.0.0", "a" * 64),
+            ("linux-64", "1.9.0", "b" * 64),
+            ("linux-64", "2.0.0", "c" * 64),
+        ],
+    )
+    try:
+        await _reindex(channel, storage)
+
+        assert storage.archive_opens == ["idx/linux-64/pkg-a-2.0.0-h0.conda"]
+
+        rows = await _rows_by_version()
+        assert rows["2.0.0"][0].doc_url == DOCS
+        assert rows["1.0.0"][0].doc_url is None
+        assert rows["1.0.0"][0].about_fetched_at is None, (
+            "an unopened version must stay unstamped, so a backfill can still reach it"
+        )
+    finally:
+        storage_module.reset_storage()
+
+
+@pytest.mark.asyncio
+async def test_string_ordering_does_not_decide_which_version_is_newest(app, tmp_path):
+    """0.10.0 is newer than 0.9.0. Reading the wrong archive would still
+    produce a plausible-looking page, so this is asserted directly."""
+    storage, channel = await _channel_with(
+        tmp_path,
+        [("linux-64", "0.9.0", "a" * 64), ("linux-64", "0.10.0", "b" * 64)],
+    )
+    try:
+        await _reindex(channel, storage)
+
+        assert storage.archive_opens == ["idx/linux-64/pkg-a-0.10.0-h0.conda"]
+    finally:
+        storage_module.reset_storage()
+
+
+@pytest.mark.asyncio
+async def test_every_artifact_of_the_newest_version_is_opened(app, tmp_path):
+    """One version can be several artifacts. Opening only one of them
+    would leave the page's metadata depending on which subdir happened to
+    sort first, and on that artifact never being removed."""
+    storage, channel = await _channel_with(
+        tmp_path,
+        [
+            ("linux-64", "1.0.0", "a" * 64),
+            ("linux-64", "2.0.0", "b" * 64),
+            ("win-64", "2.0.0", "c" * 64),
+        ],
+    )
+    try:
+        await _reindex(channel, storage)
+
+        assert sorted(storage.archive_opens) == [
+            "idx/linux-64/pkg-a-2.0.0-h0.conda",
+            "idx/win-64/pkg-a-2.0.0-h0.conda",
+        ]
+    finally:
+        storage_module.reset_storage()
+
+
+@pytest.mark.asyncio
+async def test_a_new_newest_version_is_opened_when_it_lands(app, tmp_path):
+    """Newest is a property of the moment, not of the channel.
+
+    Capturing only the newest version is correct only if a version that
+    *becomes* the newest is captured at the moment it does.
+    """
+    storage, channel = await _channel_with(tmp_path, [("linux-64", "1.0.0", "a" * 64)])
+    try:
+        await _reindex(channel, storage)
+        assert storage.archive_opens == ["idx/linux-64/pkg-a-1.0.0-h0.conda"]
+
+        await _publish(storage, [("linux-64", "2.0.0", "b" * 64)])
+        storage.archive_opens.clear()
+        stats = await _reindex(channel, storage)
+
+        assert stats["added"] == 1
+        assert storage.archive_opens == ["idx/linux-64/pkg-a-2.0.0-h0.conda"], (
+            "the version that just became newest must be read, and the old one not re-read"
+        )
+        rows = await _rows_by_version()
+        assert rows["2.0.0"][0].doc_url == DOCS
+    finally:
+        storage_module.reset_storage()
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_of_an_older_version_does_not_get_opened(app, tmp_path):
+    """The trap the ordering rules exist for, in capture form.
+
+    A rebuild of 1.0.0 lands after 2.0.0 already shipped. It is the most
+    recent *upload* and the least interesting *version*, and reading it
+    would cost an archive to produce metadata nothing renders.
+    """
+    storage, channel = await _channel_with(
+        tmp_path,
+        [("linux-64", "1.0.0", "a" * 64), ("linux-64", "2.0.0", "b" * 64)],
+    )
+    try:
+        await _reindex(channel, storage)
+        assert storage.archive_opens == ["idx/linux-64/pkg-a-2.0.0-h0.conda"]
+
+        # 1.0.0 republished: same filename, different bytes.
+        await _publish(
+            storage,
+            [("linux-64", "1.0.0", "f" * 64), ("linux-64", "2.0.0", "b" * 64)],
+        )
+        storage.archive_opens.clear()
+        stats = await _reindex(channel, storage)
+
+        assert stats["updated"] == 1
+        assert storage.archive_opens == []
+    finally:
+        storage_module.reset_storage()
+
+
+@pytest.mark.asyncio
+async def test_replaced_bytes_of_the_newest_version_are_re_read(app, tmp_path):
+    """The recapture rule still holds where it matters."""
+    storage, channel = await _channel_with(
+        tmp_path,
+        [("linux-64", "1.0.0", "a" * 64), ("linux-64", "2.0.0", "b" * 64)],
+    )
+    try:
+        await _reindex(channel, storage)
+        storage.archive_opens.clear()
+
+        await _publish(
+            storage,
+            [("linux-64", "1.0.0", "a" * 64), ("linux-64", "2.0.0", "e" * 64)],
+        )
+        await _reindex(channel, storage)
+
+        assert storage.archive_opens == ["idx/linux-64/pkg-a-2.0.0-h0.conda"]
+    finally:
+        storage_module.reset_storage()

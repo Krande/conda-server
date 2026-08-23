@@ -56,12 +56,16 @@ human-facing metadata a package page wants — documentation URL, homepage,
 repository, summary, description. Those live in a different archive member,
 `info/about.json`, so they have to be read from the artifact itself.
 
-Cost bound: the indexer opens an archive **only** for a version it just added
-or whose bytes just changed. A reindex of an unchanged channel therefore reads
-zero archives, and the steady-state cost is one archive read per newly indexed
-artifact rather than one per artifact in the channel. The import-from-upstream
-path reads its own metadata from the copy already spooled to `/tmp`, so it costs
-no extra fetch at all.
+Cost bound, in two parts. **Which packages**: only those with an artifact the
+pass just added, or whose bytes just changed — a reindex of an unchanged channel
+reads zero archives. **Which of their versions**: only the newest by conda
+ordering, because `_about_source` in the packages API renders no other, so
+metadata captured for an older version is metadata nothing asks for. "Newest" is
+recomputed from the package's whole version list on every pass, so a rebuild of
+an older version landing after a newer one shipped is not mistaken for the
+newest, and a version that becomes the newest is captured then. The
+import-from-upstream path reads its own metadata from the copy already spooled
+to `/tmp`, so it costs no extra fetch at all.
 
 Reading one archive costs a fraction of the archive, not the archive. A
 `.conda` is a zip and a zip keeps its index at the tail, so `head` plus two
@@ -73,9 +77,12 @@ no index — one solid bz2 stream — so there is nothing to seek to and they ar
 still spooled to a temporary file; `indexer.MAX_ABOUT_ARCHIVE_BYTES` bounds that
 path and only that path, skipping and stamping anything above it.
 
-That bound means rows indexed before this existed stay blank. Filling them in
-is a separate, explicit pass (`conda_server.backfill`), available three ways
-that all share one runner and one safety property:
+Those bounds mean some rows stay blank: versions indexed before this existed,
+and versions that are not the newest. Inspecting them is a separate, explicit
+pass (`conda_server.backfill`) that covers **every** version rather than just
+the newest — which is also what keeps `_about_source`'s older-version fallback
+meaningful. It is available three ways that all share one runner and one safety
+property:
 
 - **Channel admin page** — a "Backfill package metadata" button that starts a
   background `MaintenanceJob` and reports progress while it runs. The usual
