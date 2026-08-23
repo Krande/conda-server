@@ -59,10 +59,19 @@ repository, summary, description. Those live in a different archive member,
 Cost bound: the indexer opens an archive **only** for a version it just added
 or whose bytes just changed. A reindex of an unchanged channel therefore reads
 zero archives, and the steady-state cost is one archive read per newly indexed
-artifact rather than one per artifact in the channel. Archives above
-`indexer.MAX_ABOUT_ARCHIVE_BYTES` are skipped outright. The import-from-upstream
+artifact rather than one per artifact in the channel. The import-from-upstream
 path reads its own metadata from the copy already spooled to `/tmp`, so it costs
 no extra fetch at all.
+
+Reading one archive costs a fraction of the archive, not the archive. A
+`.conda` is a zip and a zip keeps its index at the tail, so `head` plus two
+ranged reads — the tail window, then the `info-*.tar.zst` member it points at —
+reach the metadata without the artifact leaving object storage and without
+anything touching local disk. Measured against conda-forge packages that is
+~0.5–1% of the bytes, for a package of any size. Legacy `.tar.bz2` archives have
+no index — one solid bz2 stream — so there is nothing to seek to and they are
+still spooled to a temporary file; `indexer.MAX_ABOUT_ARCHIVE_BYTES` bounds that
+path and only that path, skipping and stamping anything above it.
 
 That bound means rows indexed before this existed stay blank. Filling them in
 is a separate, explicit pass (`conda_server.backfill`), available three ways
@@ -75,7 +84,7 @@ that all share one runner and one safety property:
 - **`cleanup.about_backfill_per_sweep`** — an opt-in trickle that opens a few
   archives per channel on each cleanup tick, so a deployment heals without
   anyone pressing anything. **Off by default**: unlike every other sweep it
-  downloads package archives, which costs bandwidth.
+  reads package archives out of storage, which costs bandwidth.
 
 The safety property is the `about_fetched_at` stamp: every row inspected is
 stamped whether or not the archive had an `about.json`, so the three can never

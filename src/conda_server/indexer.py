@@ -15,7 +15,9 @@ One field group does *not* come from repodata: the ``info/about.json``
 metadata (docs URL, homepage, repository, summary, description). repodata is
 built from ``info/index.json`` and carries none of it, so it has to come out
 of the archive itself — see ``_capture_about`` for the cost bound that keeps
-that from turning every reindex into a full channel download.
+that from turning every reindex into a full channel download, and
+``capture_about`` for how a ``.conda`` gives up its metadata without the
+artifact ever leaving object storage.
 """
 
 from __future__ import annotations
@@ -37,18 +39,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from conda_server.config import StorageSettings, get_settings, resolve_path
 from conda_server.logging import get_logger
 from conda_server.models import Channel, Package, PackageVersion
-from conda_server.package_about import PackageAbout, read_package_about
+from conda_server.package_about import (
+    ArchiveFetchError,
+    PackageAbout,
+    read_conda_about_ranged,
+    read_package_about,
+)
 from conda_server.storage import Storage
 
 log = get_logger(__name__)
 
 
-#: Archives larger than this are not opened for ``about.json``. Reading
-#: the member means pulling the object out of storage first, and a docs
-#: link is not worth streaming a multi-gigabyte artifact. Rows skipped
-#: this way are still marked as attempted so the backfill command does
-#: not keep retrying them.
-MAX_ABOUT_ARCHIVE_BYTES = 512 * 1024 * 1024
+#: Cap on the ``.tar.bz2`` archives opened for ``about.json``, and only
+#: those: the legacy format has to be spooled to local disk in full
+#: before its metadata member can be reached, so the cost of reading a
+#: docs link is the size of the whole package. ``.conda`` archives are
+#: read through byte ranges and are not bounded here — see
+#: ``_capture_about_ranged``.
+#:
+#: Deliberately much smaller than a package can be. Ephemeral disk is a
+#: shared, hard, per-container limit and several of these can be in
+#: flight at once, so the ceiling has to be one a container can actually
+#: absorb rather than one large enough for every conceivable artifact.
+#: Legacy archives past it are stamped, not retried.
+MAX_ABOUT_ARCHIVE_BYTES = 64 * 1024 * 1024
 
 
 SUBDIRS = (
@@ -336,18 +350,74 @@ async def capture_about(
     is retried on the next pass rather than remembered as "this package
     has no metadata".
 
-    Oversized archives *are* stamped: the size cap is a policy decision,
-    not a transient failure, and retrying would re-read the same object
-    forever.
+    Which of the two paths below runs is decided by the archive format,
+    not by configuration, because it is the format that decides whether
+    the metadata can be reached without moving the whole artifact.
+    """
+    key = f"{prefix}/{row.subdir}/{row.filename}"
+    if row.filename.endswith(".conda"):
+        return await _capture_about_ranged(storage, key, row)
+    return await _capture_about_spooled(storage, key, row)
+
+
+async def _capture_about_ranged(storage: Storage, key: str, row: PackageVersion) -> bool:
+    """``.conda``: read the zip's tail and its info member, nothing else.
+
+    No size cap applies here, and none is needed: the reads are the
+    archive's tail window plus one member of a few KB, so the cost does
+    not grow with the artifact. A cap would only mean declining metadata
+    for large packages in exchange for saving nothing.
+    """
+    fetched = 0
+
+    async def read_range(start: int, length: int) -> bytes:
+        nonlocal fetched
+        try:
+            chunk = await storage.get_range(key, start=start, length=length)
+        except Exception as exc:
+            raise ArchiveFetchError(str(exc)) from exc
+        fetched += len(chunk)
+        return chunk
+
+    try:
+        meta = await storage.head(key)
+    except Exception as exc:
+        log.debug("about.fetch_failed", key=key, error=str(exc))
+        return False
+    if meta is None:
+        log.debug("about.fetch_failed", key=key, error="object not found")
+        return False
+
+    try:
+        about = await read_conda_about_ranged(read_range, meta.size)
+    except ArchiveFetchError as exc:
+        log.debug("about.fetch_failed", key=key, error=str(exc))
+        return False
+
+    log.debug("about.ranged_read", key=key, archive_bytes=meta.size, fetched_bytes=fetched)
+    apply_about(row, about)
+    return True
+
+
+async def _capture_about_spooled(storage: Storage, key: str, row: PackageVersion) -> bool:
+    """``.tar.bz2``: the whole object, via a temporary file.
+
+    The legacy format is a single solid bz2 stream with no index, so the
+    only route to ``info/about.json`` is decompressing from the start —
+    there is nothing for a ranged read to seek to. That leaves the
+    original approach, and with it the original cost, which is why
+    ``MAX_ABOUT_ARCHIVE_BYTES`` still guards this path and only this one.
+
+    Oversized archives are stamped rather than left pending: the cap is a
+    policy decision, not a transient failure, and retrying would re-read
+    the same object forever.
     """
     if row.size is not None and row.size > MAX_ABOUT_ARCHIVE_BYTES:
         log.debug("about.skipped_oversized", filename=row.filename, size=row.size)
         apply_about(row, PackageAbout.empty())
         return True
 
-    key = f"{prefix}/{row.subdir}/{row.filename}"
-    suffix = ".conda" if row.filename.endswith(".conda") else ".tar.bz2"
-    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    fd, tmp_path = tempfile.mkstemp(suffix=".tar.bz2")
     try:
         try:
             with os.fdopen(fd, "wb") as tmp:

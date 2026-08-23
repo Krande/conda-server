@@ -15,15 +15,20 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tarfile
 import zipfile
 from pathlib import Path
 
+import pytest
 import zstandard
 
 from conda_server.package_about import (
     MAX_DESCRIPTION_CHARS,
+    ArchiveFetchError,
     PackageAbout,
+    RangeReader,
+    read_conda_about_ranged,
     read_package_about,
 )
 
@@ -205,3 +210,131 @@ def test_unknown_extension_is_ignored(tmp_path):
     other.write_bytes(b"whatever")
 
     assert read_package_about(other).is_empty()
+
+
+# --- reading a .conda through byte ranges ------------------------------
+#
+# The property under test is not "it produces the same answer" — though
+# it must — but "it produces the same answer without moving the archive".
+# A package is mostly payload, and reading a few hundred bytes of
+# metadata out of its tail used to mean spooling all of it to local disk.
+# These tests assert on bytes fetched, because that is the part that was
+# wrong.
+
+
+def _blob_range_reader(blob: bytes) -> tuple[RangeReader, list[int]]:
+    """A ``RangeReader`` over an in-memory archive, plus a fetch log."""
+    fetched: list[int] = []
+
+    async def read_range(start: int, length: int) -> bytes:
+        chunk = blob[start : start + max(length, 0)]
+        fetched.append(len(chunk))
+        return chunk
+
+    return read_range, fetched
+
+
+def make_conda_blob(about: dict | None, *, payload_size: int = 0, comment: bytes = b"") -> bytes:
+    """A ``.conda`` as bytes, with a payload member of a chosen size.
+
+    The payload is random rather than zeros so it cannot compress down to
+    nothing — these tests turn on there being a large member that must
+    *not* be fetched.
+    """
+    compressor = zstandard.ZstdCompressor()
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w") as tf:
+        _add(tf, "lib/python3.12/site-packages/pkg_a/blob.bin", os.urandom(payload_size))
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("metadata.json", json.dumps({"conda_pkg_format_version": 2}))
+        zf.writestr("info-pkg-a-1.0.0-h0.tar.zst", compressor.compress(_info_tar_bytes(about)))
+        zf.writestr("pkg-pkg-a-1.0.0-h0.tar.zst", compressor.compress(payload.getvalue()))
+        if comment:
+            zf.comment = comment
+    return buf.getvalue()
+
+
+async def test_ranged_read_matches_the_path_based_read(tmp_path):
+    """Same archive, two routes in, one answer."""
+    blob = make_conda_blob(FULL_ABOUT)
+    archive = tmp_path / "pkg-a-1.0.0-h0.conda"
+    archive.write_bytes(blob)
+    read_range, _ = _blob_range_reader(blob)
+
+    assert await read_conda_about_ranged(read_range, len(blob)) == read_package_about(archive)
+
+
+async def test_ranged_read_leaves_the_payload_alone():
+    """The regression this path exists for.
+
+    A 4 MiB archive must cost tens of KB to read, not 4 MiB. The bound is
+    the tail window plus the info member and does not grow with the
+    package, so it is asserted as an absolute number rather than a ratio.
+    """
+    blob = make_conda_blob(FULL_ABOUT, payload_size=4 * 1024 * 1024)
+    read_range, fetched = _blob_range_reader(blob)
+
+    about = await read_conda_about_ranged(read_range, len(blob))
+
+    assert about.doc_url == "https://example.com/docs/pkg-a/"
+    assert len(blob) > 4 * 1024 * 1024
+    assert sum(fetched) < 128 * 1024, f"fetched {sum(fetched)} bytes of a {len(blob)}-byte archive"
+
+
+async def test_ranged_read_widens_the_window_for_a_long_archive_comment():
+    """A comment can push the central directory outside the first window.
+
+    Zip keeps its index at the tail, so how far back to read is a guess
+    until the very last record has been parsed. Getting the guess wrong
+    has to cost another read, not the metadata.
+    """
+    # Bigger than the first tail window, so the comment genuinely pushes
+    # the records zipfile needs out of it rather than the window happening
+    # to cover the whole file.
+    blob = make_conda_blob(FULL_ABOUT, payload_size=128 * 1024, comment=b"c" * 60_000)
+    assert len(blob) > 64 * 1024
+    read_range, fetched = _blob_range_reader(blob)
+
+    about = await read_conda_about_ranged(read_range, len(blob))
+
+    assert about.doc_url == "https://example.com/docs/pkg-a/"
+    assert len(fetched) > 2, "the first tail window should have missed and been retried"
+
+
+async def test_ranged_read_of_an_archive_without_about_json_is_empty():
+    blob = make_conda_blob(None)
+    read_range, _ = _blob_range_reader(blob)
+
+    assert (await read_conda_about_ranged(read_range, len(blob))).is_empty()
+
+
+async def test_ranged_read_of_a_non_zip_is_empty_not_an_error():
+    """Same contract as the path-based read: a bad archive is not fatal."""
+    blob = b"this is not a zip file" * 100
+    read_range, _ = _blob_range_reader(blob)
+
+    assert (await read_conda_about_ranged(read_range, len(blob))).is_empty()
+
+
+async def test_ranged_read_of_an_empty_object_is_empty():
+    read_range, fetched = _blob_range_reader(b"")
+
+    assert (await read_conda_about_ranged(read_range, 0)).is_empty()
+    assert fetched == [], "a zero-length object is not worth a request"
+
+
+async def test_a_failed_fetch_is_distinguishable_from_missing_metadata():
+    """The distinction the caller's retry logic is built on.
+
+    "This archive has no about.json" is remembered; "storage would not
+    give me the bytes" has to be retried. Collapsing the two would let a
+    blip during indexing permanently blank a package's links.
+    """
+
+    async def read_range(start: int, length: int) -> bytes:
+        raise ArchiveFetchError("storage said no")
+
+    with pytest.raises(ArchiveFetchError):
+        await read_conda_about_ranged(read_range, 4096)

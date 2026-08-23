@@ -64,6 +64,24 @@ class Storage(ABC):
         once."""
 
     @abstractmethod
+    async def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        """Return ``length`` bytes of the object beginning at ``start``.
+
+        This is the difference between reading a few kilobytes out of a
+        package and moving the package: a ``.conda`` is a zip, and the
+        central directory at its tail says exactly where the small
+        metadata member sits, so two ranged reads replace a whole-object
+        download. See ``conda_server.package_about.read_conda_about_ranged``.
+
+        Semantics follow an HTTP range request: a range running past the
+        end of the object yields the remainder rather than failing, and a
+        non-positive ``length`` yields ``b""``. ``start`` is expected to
+        be inside the object — callers learn its size from ``head`` — and
+        a backend may reject a start at or past the end. Missing objects
+        raise the same way ``get`` does.
+        """
+
+    @abstractmethod
     async def delete(self, key: str) -> None: ...
 
     async def delete_prefix(self, prefix: str) -> int:
@@ -171,6 +189,14 @@ class ObstoreStorage(Storage):
         result = await obstore.get_async(self._store, key)
         async for chunk in result.stream():
             yield bytes(chunk)
+
+    async def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        # obstore rejects a zero-length range outright, so short-circuit
+        # rather than making the callers guard every arithmetic result.
+        if length <= 0:
+            return b""
+        buf = await obstore.get_range_async(self._store, key, start=start, length=length)
+        return bytes(buf)
 
     async def delete(self, key: str) -> None:
         await obstore.delete_async(self._store, key)

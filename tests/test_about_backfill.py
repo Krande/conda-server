@@ -25,6 +25,7 @@ from conda_server import storage as storage_module
 from conda_server.backfill import backfill_about_batch, count_pending
 from conda_server.config import StorageSettings
 from conda_server.db import get_sessionmaker
+from conda_server.indexer import PACKAGE_SUFFIXES
 from conda_server.models import Channel, MaintenanceJob, Package, PackageVersion, User
 from conda_server.storage import build_storage
 from tests.conftest import make_session_cookie
@@ -34,28 +35,41 @@ DOCS = "https://example.com/docs/pkg-a/"
 
 
 class _FlakyStorage:
-    """Counts archive reads and can be told to abort partway through.
+    """Counts archive opens and can be told to abort partway through.
 
-    ``cancel_after`` makes the next stream call raise
-    ``asyncio.CancelledError``. That is the realistic way one of these
-    runs dies: a plain storage error is deliberately *not* fatal
-    (``capture_about`` swallows it and moves on), so the thing that
-    actually stops a pass mid-flight is the task being cancelled —
-    a restart, a shutdown, a Ctrl-C.
+    An open is counted at whichever storage call the capture path starts
+    with — ``head`` for the ranged ``.conda`` path, ``stream`` for the
+    spooled ``.tar.bz2`` one — so one entry means one archive either way.
+    Non-archive keys (repodata) are ignored.
+
+    ``cancel_after`` makes the next open raise ``asyncio.CancelledError``.
+    That is the realistic way one of these runs dies: a plain storage
+    error is deliberately *not* fatal (``capture_about`` swallows it and
+    moves on), so the thing that actually stops a pass mid-flight is the
+    task being cancelled — a restart, a shutdown, a Ctrl-C.
     """
 
     def __init__(self, inner):
         self._inner = inner
-        self.stream_calls: list[str] = []
+        self.archive_opens: list[str] = []
         self.cancel_after: int | None = None
 
     def __getattr__(self, item):
         return getattr(self._inner, item)
 
-    def stream(self, key: str):
-        self.stream_calls.append(key)
-        if self.cancel_after is not None and len(self.stream_calls) > self.cancel_after:
+    def _record(self, key: str) -> None:
+        if not key.endswith(PACKAGE_SUFFIXES):
+            return
+        self.archive_opens.append(key)
+        if self.cancel_after is not None and len(self.archive_opens) > self.cancel_after:
             raise asyncio.CancelledError()
+
+    async def head(self, key: str):
+        self._record(key)
+        return await self._inner.head(key)
+
+    def stream(self, key: str):
+        self._record(key)
         return self._inner.stream(key)
 
 
@@ -159,7 +173,7 @@ async def test_second_pass_reads_nothing(app, tmp_path):
             chan = await session.get(Channel, channel.id)
             await backfill_about_batch(session, storage, chan, limit=10)
 
-        reads_after_first = len(storage.stream_calls)
+        reads_after_first = len(storage.archive_opens)
         assert reads_after_first == 3
 
         async with sm() as session:
@@ -168,7 +182,7 @@ async def test_second_pass_reads_nothing(app, tmp_path):
             stats = await backfill_about_batch(session, storage, chan, limit=10)
 
         assert stats.touched == 0
-        assert len(storage.stream_calls) == reads_after_first, "second pass must read nothing"
+        assert len(storage.archive_opens) == reads_after_first, "second pass must read nothing"
     finally:
         storage_module.reset_storage()
 
@@ -184,7 +198,7 @@ async def test_limit_bounds_a_run_and_reports_more_work(app, tmp_path):
 
         assert stats.inspected == 2
         assert stats.hit_limit is True
-        assert len(storage.stream_calls) == 2, "limit must bound egress, not just the report"
+        assert len(storage.archive_opens) == 2, "limit must bound egress, not just the report"
 
         async with sm() as session:
             chan = await session.get(Channel, channel.id)
@@ -208,7 +222,7 @@ async def test_force_reopens_already_stamped_rows(app, tmp_path):
             stats = await backfill_about_batch(session, storage, chan, limit=10, force=True)
 
         assert stats.inspected == 2
-        assert len(storage.stream_calls) == 4
+        assert len(storage.archive_opens) == 4
     finally:
         storage_module.reset_storage()
 
@@ -247,13 +261,13 @@ async def test_interrupted_run_keeps_the_archives_it_already_read(app, tmp_path)
 
         # And a fresh run resumes rather than starting over.
         storage.cancel_after = None
-        reads_before = len(storage.stream_calls)
+        reads_before = len(storage.archive_opens)
         async with sm() as session:
             chan = await session.get(Channel, channel.id)
             stats = await backfill_about_batch(session, storage, chan, limit=count)
 
         assert stats.inspected == remaining
-        assert len(storage.stream_calls) - reads_before == remaining, (
+        assert len(storage.archive_opens) - reads_before == remaining, (
             "the resumed run must not re-read what the first run committed"
         )
     finally:
@@ -502,7 +516,7 @@ async def test_trickle_is_bounded_per_channel(app, tmp_path):
     try:
         inspected = await trickle_about_backfill(per_channel=2)
         assert inspected == 2
-        assert len(storage.stream_calls) == 2
+        assert len(storage.archive_opens) == 2
 
         sm = get_sessionmaker()
         async with sm() as session:
@@ -525,7 +539,7 @@ async def test_trickle_skips_mirror_channels(app, tmp_path):
             await session.commit()
 
         assert await trickle_about_backfill(per_channel=10) == 0
-        assert storage.stream_calls == []
+        assert storage.archive_opens == []
     finally:
         storage_module.reset_storage()
 
