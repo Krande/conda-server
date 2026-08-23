@@ -24,10 +24,10 @@ import pytest
 from conda_server import storage as storage_module
 from conda_server.config import StorageSettings
 from conda_server.db import get_sessionmaker
-from conda_server.indexer import _sync_db_from_repodata, capture_about
+from conda_server.indexer import PACKAGE_SUFFIXES, _sync_db_from_repodata, capture_about
 from conda_server.models import Channel, Package, PackageVersion
 from conda_server.storage import build_storage
-from tests.test_package_about import FULL_ABOUT, make_conda
+from tests.test_package_about import FULL_ABOUT, make_conda, make_conda_blob
 
 DOCS = "https://example.com/docs/pkg-a/"
 OLD_DOCS = "https://example.com/docs/pkg-a/v1/"
@@ -203,21 +203,33 @@ def _repodata(filename: str, sha256: str, size: int) -> bytes:
 
 
 class _CountingStorage:
-    """Delegating wrapper that counts archive reads.
+    """Delegating wrapper that counts archive opens.
 
-    The point of the indexer's cost bound is a number of storage reads,
-    so the test asserts on that number rather than on wall time.
+    The point of the indexer's cost bound is a number of archives opened,
+    so the tests assert on that rather than on wall time. Both capture
+    paths are counted at their first storage call — ``head`` for the
+    ranged ``.conda`` path, ``stream`` for the spooled ``.tar.bz2`` one —
+    so one entry still means one archive whichever path ran. Non-archive
+    keys (repodata) are ignored.
     """
 
     def __init__(self, inner):
         self._inner = inner
-        self.stream_calls: list[str] = []
+        self.archive_opens: list[str] = []
 
     def __getattr__(self, item):
         return getattr(self._inner, item)
 
+    def _record(self, key: str) -> None:
+        if key.endswith(PACKAGE_SUFFIXES):
+            self.archive_opens.append(key)
+
+    async def head(self, key: str):
+        self._record(key)
+        return await self._inner.head(key)
+
     def stream(self, key: str):
-        self.stream_calls.append(key)
+        self._record(key)
         return self._inner.stream(key)
 
 
@@ -298,7 +310,7 @@ async def test_reindex_does_not_reopen_unchanged_archives(app, tmp_path):
             await _sync_db_from_repodata(session, storage, channel)
             await session.commit()
 
-        assert len(storage.stream_calls) == 1, "first pass reads the new archive once"
+        assert len(storage.archive_opens) == 1, "first pass reads the new archive once"
 
         async with sm() as session:
             channel = await session.get(Channel, channel.id)
@@ -306,7 +318,7 @@ async def test_reindex_does_not_reopen_unchanged_archives(app, tmp_path):
             await session.commit()
 
         assert stats == {"added": 0, "updated": 0, "removed": 0}
-        assert len(storage.stream_calls) == 1, "second pass must read no archives"
+        assert len(storage.archive_opens) == 1, "second pass must read no archives"
     finally:
         storage_module.reset_storage()
 
@@ -361,8 +373,12 @@ async def test_capture_leaves_row_unstamped_when_the_object_is_missing(app, tmp_
 
 
 @pytest.mark.asyncio
-async def test_oversized_archive_is_skipped_but_stamped(app, tmp_path):
-    """The size cap is policy, not failure, so retrying would be pointless."""
+async def test_oversized_legacy_archive_is_skipped_but_stamped(app, tmp_path):
+    """The size cap is policy, not failure, so retrying would be pointless.
+
+    It applies to ``.tar.bz2`` only, which is the format that has to be
+    spooled to disk in full before its metadata can be reached.
+    """
     from conda_server.indexer import MAX_ABOUT_ARCHIVE_BYTES
 
     storage = build_storage(StorageSettings(backend="local", url=str(tmp_path)))
@@ -372,13 +388,99 @@ async def test_oversized_archive_is_skipped_but_stamped(app, tmp_path):
         build="h0",
         build_number=0,
         subdir="linux-64",
-        filename="huge-1.0.0-h0.conda",
+        filename="huge-1.0.0-h0.tar.bz2",
         size=MAX_ABOUT_ARCHIVE_BYTES + 1,
     )
 
     assert await capture_about(storage, "idx", row) is True
     assert row.about_fetched_at is not None
     assert row.doc_url is None
+
+
+class _ByteCountingStorage:
+    """Delegating wrapper that totals the archive bytes actually moved.
+
+    Counting opens is the cost bound; counting *bytes* is the other half,
+    and the one the ranged path exists for.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.fetched = 0
+
+    def __getattr__(self, item):
+        return getattr(self._inner, item)
+
+    async def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        chunk = await self._inner.get_range(key, start=start, length=length)
+        self.fetched += len(chunk)
+        return chunk
+
+    async def stream(self, key: str):
+        async for chunk in self._inner.stream(key):
+            self.fetched += len(chunk)
+            yield chunk
+
+
+async def _store_conda(tmp_path, blob: bytes) -> _ByteCountingStorage:
+    storage = _ByteCountingStorage(
+        build_storage(StorageSettings(backend="local", url=str(tmp_path)))
+    )
+    await storage.put("idx/linux-64/pkg-a-1.0.0-h0.conda", blob)
+    return storage
+
+
+def _conda_row(size: int) -> PackageVersion:
+    return PackageVersion(
+        package_id=1,
+        version="1.0.0",
+        build="h0",
+        build_number=0,
+        subdir="linux-64",
+        filename="pkg-a-1.0.0-h0.conda",
+        size=size,
+    )
+
+
+@pytest.mark.asyncio
+async def test_capturing_a_conda_moves_a_fraction_of_the_archive(app, tmp_path):
+    """Reading a docs link must not cost the price of the package.
+
+    Spooling the archive to a temporary file to reach a few hundred bytes
+    in its tail put the whole artifact on the container's ephemeral disk
+    — a shared, hard limit, and one an indexing pass hits once per newly
+    published package.
+    """
+    blob = make_conda_blob(FULL_ABOUT, payload_size=4 * 1024 * 1024)
+    storage = await _store_conda(tmp_path, blob)
+    row = _conda_row(len(blob))
+
+    assert await capture_about(storage, "idx", row) is True
+
+    assert row.doc_url == DOCS
+    assert storage.fetched < 128 * 1024, (
+        f"moved {storage.fetched} bytes of a {len(blob)}-byte archive"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_size_cap_does_not_apply_to_conda_archives(app, tmp_path, monkeypatch):
+    """A ranged read costs the same whatever the package weighs.
+
+    The cap exists because the legacy format has to be downloaded in full.
+    Applying it to ``.conda`` would decline metadata for exactly the
+    packages it is cheapest to read, and save nothing.
+    """
+    import conda_server.indexer as indexer_module
+
+    blob = make_conda_blob(FULL_ABOUT, payload_size=64 * 1024)
+    monkeypatch.setattr(indexer_module, "MAX_ABOUT_ARCHIVE_BYTES", 1024)
+    storage = await _store_conda(tmp_path, blob)
+    row = _conda_row(len(blob))
+    assert row.size > 1024
+
+    assert await capture_about(storage, "idx", row) is True
+    assert row.doc_url == DOCS
 
 
 @pytest.mark.asyncio
@@ -421,7 +523,7 @@ async def test_inline_created_row_is_not_re_read_by_the_next_reindex(app, tmp_pa
             await session.commit()
 
         assert stats == {"added": 0, "updated": 1, "removed": 0}
-        assert storage.stream_calls == [], "no archive should be re-read"
+        assert storage.archive_opens == [], "no archive should be re-read"
 
         async with sm() as session:
             row = (await session.execute(PackageVersion.__table__.select())).first()
@@ -463,7 +565,7 @@ async def test_replaced_bytes_trigger_a_fresh_read(app, tmp_path):
             await _sync_db_from_repodata(session, storage, channel)
             await session.commit()
 
-        assert len(storage.stream_calls) == 1
+        assert len(storage.archive_opens) == 1
 
         async with sm() as session:
             row = (await session.execute(PackageVersion.__table__.select())).first()

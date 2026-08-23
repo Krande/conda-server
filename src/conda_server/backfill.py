@@ -48,13 +48,15 @@ log = get_logger(__name__)
 #: is not the dominant cost of a pass.
 _COMMIT_EVERY = 25
 
-#: Archives are streamed to a temporary file on local disk before their
-#: metadata member is read, so N workers can hold up to N times the
-#: indexer's archive size cap on disk at once. The limit on parallelism
-#: here is therefore free disk, not CPU or bandwidth, and containers
-#: often run with a modest ephemeral-storage allowance. Two is a
-#: conservative default that still overlaps network waits; raise it only
-#: if you know the host has room.
+#: ``.conda`` archives are read through byte ranges and cost a fixed few
+#: KB each, so they no longer constrain this. Legacy ``.tar.bz2``
+#: archives are still spooled to a temporary file first, and N workers
+#: can hold up to N times ``MAX_ABOUT_ARCHIVE_BYTES`` on local disk at
+#: once — so on a channel carrying legacy artifacts the limit on
+#: parallelism is free disk, not CPU or bandwidth, and containers often
+#: run with a modest ephemeral-storage allowance. Two is a conservative
+#: default that still overlaps network waits; raise it only if you know
+#: the host has room.
 DEFAULT_CONCURRENCY = 2
 
 

@@ -50,6 +50,47 @@ async def test_list_returns_keys_and_sizes(mem_storage: ObstoreStorage):
 
 
 @pytest.mark.asyncio
+async def test_get_range_returns_exactly_the_requested_slice(mem_storage: ObstoreStorage):
+    await mem_storage.put("a.bin", bytes(range(256)))
+
+    assert await mem_storage.get_range("a.bin", start=10, length=5) == bytes(range(10, 15))
+
+
+@pytest.mark.asyncio
+async def test_get_range_past_the_end_returns_the_remainder(mem_storage: ObstoreStorage):
+    """HTTP range semantics. A caller sizing its last read from ``head``
+    would otherwise have to get the arithmetic exactly right or fail."""
+    await mem_storage.put("a.bin", b"0123456789")
+
+    assert await mem_storage.get_range("a.bin", start=7, length=999) == b"789"
+
+
+@pytest.mark.asyncio
+async def test_get_range_of_nothing_is_not_a_request(mem_storage: ObstoreStorage):
+    """obstore rejects a zero-length range outright, and a caller
+    computing a length from two offsets can legitimately arrive at zero."""
+    await mem_storage.put("a.bin", b"0123456789")
+
+    assert await mem_storage.get_range("a.bin", start=0, length=0) == b""
+
+
+@pytest.mark.asyncio
+async def test_get_range_on_a_missing_object_raises(mem_storage: ObstoreStorage):
+    with pytest.raises(FileNotFoundError):
+        await mem_storage.get_range("absent.bin", start=0, length=4)
+
+
+@pytest.mark.asyncio
+async def test_get_range_on_the_local_backend(tmp_path: Path):
+    """The filesystem backend serves ranges too — a local deployment
+    reads package metadata through the same path a cloud one does."""
+    storage = build_storage(StorageSettings(backend="local", url=str(tmp_path)))
+    await storage.put("dir/a.bin", bytes(range(256)))
+
+    assert await storage.get_range("dir/a.bin", start=200, length=8) == bytes(range(200, 208))
+
+
+@pytest.mark.asyncio
 async def test_presign_unsupported_raises(mem_storage: ObstoreStorage):
     with pytest.raises(NotImplementedError):
         await mem_storage.presign_get("any", expires_in=60)
