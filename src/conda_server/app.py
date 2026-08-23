@@ -25,7 +25,7 @@ from conda_server.metrics import metrics_endpoint
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    await _fail_orphaned_import_jobs()
+    await _fail_orphaned_jobs()
     cleanup_task = asyncio.create_task(cleanup_loop())
     try:
         yield
@@ -36,32 +36,38 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await dispose_engine()
 
 
-async def _fail_orphaned_import_jobs() -> None:
-    """Mark any ``running`` import jobs as failed at startup.
+async def _fail_orphaned_jobs() -> None:
+    """Mark any in-flight job rows as failed at startup.
 
-    ImportJob runners are in-process asyncio tasks, not durable workers.
-    A pod restart mid-import leaves their rows in ``running`` forever
-    and the UI's status poll spins indefinitely. Sweep them on boot so
-    operators see "pod restarted, please retry" instead of a stuck bar.
+    Job runners are in-process asyncio tasks, not durable workers. A pod
+    restart mid-run leaves their rows in ``running`` forever and the
+    UI's status poll spins indefinitely. Sweep them on boot so operators
+    see "restarted, please retry" instead of a stuck bar.
+
+    Retrying is cheap for both kinds: an import skips files already
+    stored, and a metadata backfill skips versions already stamped, so
+    whatever the interrupted run finished is not repeated.
     """
     from datetime import datetime
 
     from sqlalchemy import update
 
     from conda_server.db import get_sessionmaker
-    from conda_server.models import ImportJob
+    from conda_server.models import ImportJob, MaintenanceJob
 
+    message = "server restarted before the job finished"
     sm = get_sessionmaker()
     async with sm() as session:
-        await session.execute(
-            update(ImportJob)
-            .where(ImportJob.status.in_(["pending", "running"]))
-            .values(
-                status="failed",
-                error="pod restarted before the import finished",
-                finished_at=datetime.now(UTC),
+        for model in (ImportJob, MaintenanceJob):
+            await session.execute(
+                update(model)
+                .where(model.status.in_(["pending", "running"]))
+                .values(
+                    status="failed",
+                    error=message,
+                    finished_at=datetime.now(UTC),
+                )
             )
-        )
         await session.commit()
 
 

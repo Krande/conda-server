@@ -45,6 +45,13 @@ max_total_bytes = 4294967296   # 4 GiB
 # by the in-pod cleanup loop. Set ttl to 0 to keep all rows forever.
 import_job_ttl_days = 30
 interval_seconds = 3600
+# Versions per channel, per sweep, whose archive is opened to read the
+# info/about.json metadata (docs URL, homepage, summary) that older rows
+# never had. 0 disables it. Unlike the prune above this downloads package
+# archives from object storage, so it is off by default — turn it on to
+# let a channel fill in gradually, or use the channel admin page / the
+# `conda-server backfill-about` command to do it on demand.
+about_backfill_per_sweep = 0
 
 [logging]
 level = "INFO"

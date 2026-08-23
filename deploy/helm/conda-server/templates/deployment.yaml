@@ -149,6 +149,8 @@ spec:
               value: {{ .Values.app.cleanupImportJobTtlDays | quote }}
             - name: CONDA_SERVER_CLEANUP__INTERVAL_SECONDS
               value: {{ .Values.app.cleanupIntervalSeconds | quote }}
+            - name: CONDA_SERVER_CLEANUP__ABOUT_BACKFILL_PER_SWEEP
+              value: {{ .Values.app.cleanupAboutBackfillPerSweep | quote }}
             {{- with .Values.app.oidc.issuer }}
             - name: CONDA_SERVER_AUTH__OIDC__ISSUER
               value: {{ . | quote }}

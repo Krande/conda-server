@@ -4,7 +4,12 @@ import { Button } from "./ui/Button";
 import { Card, CardBody, CardHeader } from "./ui/Card";
 import { ErrorState } from "./ui/EmptyState";
 import { Input } from "./ui/Input";
-import { useDeleteChannel, useReindexChannel } from "@/lib/queries";
+import {
+  useBackfillAbout,
+  useBackfillJob,
+  useDeleteChannel,
+  useReindexChannel,
+} from "@/lib/queries";
 import type { Channel } from "@/lib/types";
 
 /**
@@ -61,6 +66,8 @@ export function ChannelAdminCard({ channel }: { channel: Channel }) {
           {reindex.error && <ErrorState error={reindex.error} />}
         </div>
 
+        <BackfillAboutSection channelName={channel.name} mirror={Boolean(channel.mirror_url)} />
+
         <div className="space-y-2 border-t border-amber-200 pt-4 dark:border-amber-900/60">
           <div>
             <div className="text-sm font-medium text-red-800 dark:text-red-300">Delete channel</div>
@@ -89,5 +96,101 @@ export function ChannelAdminCard({ channel }: { channel: Channel }) {
         </div>
       </CardBody>
     </Card>
+  );
+}
+
+/**
+ * Fills in documentation / homepage / repository links for versions
+ * that were indexed before the server read `info/about.json`.
+ *
+ * Unlike the reindex button next to it, this one reports real progress:
+ * the work is one object-storage download per version, so it can run
+ * for minutes and a fire-and-forget "queued, check the logs" would be
+ * useless. A run is capped server-side, and says so when it stops at
+ * that cap rather than pretending to be finished — pressing the button
+ * again picks up where it left off, because every version it inspects
+ * is stamped as inspected.
+ */
+function BackfillAboutSection({
+  channelName,
+  mirror,
+}: {
+  channelName: string;
+  mirror: boolean;
+}) {
+  const start = useBackfillAbout();
+  const [jobId, setJobId] = useState<number | null>(null);
+  const job = useBackfillJob(channelName, jobId);
+
+  // Mirror channels proxy an upstream and never store version rows, so
+  // there is nothing local to read metadata out of.
+  if (mirror) return null;
+
+  const running =
+    job.data?.status === "running" || job.data?.status === "pending";
+  const upToDate = start.data?.status === "up-to-date";
+
+  const handleStart = async () => {
+    const res = await start.mutateAsync(channelName);
+    setJobId(res.job_id);
+  };
+
+  return (
+    <div className="space-y-2 border-t border-amber-200 pt-4 dark:border-amber-900/60">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
+            Backfill package metadata
+          </div>
+          <p className="text-xs text-slate-600 dark:text-slate-400">
+            Read <code>info/about.json</code> from archives already in storage so
+            package pages can show documentation, homepage and repository links.
+            Downloads one archive per version, so it can take a while.
+          </p>
+        </div>
+        <Button
+          variant="secondary"
+          onClick={handleStart}
+          loading={start.isPending || running}
+          disabled={running}
+        >
+          Backfill
+        </Button>
+      </div>
+
+      {upToDate && (
+        <div className="rounded border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-800/40 dark:text-slate-300">
+          Every version in this channel has already been inspected.
+        </div>
+      )}
+
+      {job.data && (
+        <div className="space-y-1 rounded border border-brand-300 bg-brand-50 px-3 py-2 text-xs text-brand-900 dark:border-brand-700/60 dark:bg-brand-500/10 dark:text-brand-200">
+          <div>
+            {running ? "Reading archives" : "Finished"}:{" "}
+            <strong>
+              {job.data.completed_count}
+              {job.data.total_count > 0 && ` / ${job.data.total_count}`}
+            </strong>{" "}
+            inspected, <strong>{job.data.with_metadata_count}</strong> with metadata
+            {job.data.failed_count > 0 && (
+              <>
+                , <strong>{job.data.failed_count}</strong> unreadable
+              </>
+            )}
+            .
+          </div>
+          {job.data.status === "failed" && job.data.error && (
+            <div className="text-red-700 dark:text-red-300">{job.data.error}</div>
+          )}
+          {job.data.status === "completed" && job.data.error && (
+            <div>{job.data.error}</div>
+          )}
+        </div>
+      )}
+
+      {start.error && <ErrorState error={start.error} />}
+      {job.error && <ErrorState error={job.error} />}
+    </div>
   );
 }

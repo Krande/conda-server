@@ -95,7 +95,51 @@ export const channels = {
       `/channels/${encodeURIComponent(name)}/import/jobs/${jobId}`,
       { signal },
     ),
+  backfillAbout: (name: string) =>
+    api<BackfillAboutStart>(
+      `/channels/${encodeURIComponent(name)}/backfill-about`,
+      { method: "POST" },
+    ),
+  getBackfillJob: (name: string, jobId: number, signal?: AbortSignal) =>
+    api<MaintenanceJob>(
+      `/channels/${encodeURIComponent(name)}/backfill-about/jobs/${jobId}`,
+      { signal },
+    ),
 };
+
+/**
+ * Response to starting a metadata backfill. `job_id` is null when there
+ * was nothing to do — the channel's versions have all been inspected
+ * already, so no job is created and the UI just says so.
+ */
+export interface BackfillAboutStart {
+  status: "accepted" | "up-to-date";
+  job_id: number | null;
+  channel: string;
+  pending: number;
+  status_url?: string;
+}
+
+/** Progress row for a long-running housekeeping pass. */
+export interface MaintenanceJob {
+  id: number;
+  kind: string;
+  channel: string | null;
+  status: "pending" | "running" | "completed" | "failed";
+  total_count: number;
+  completed_count: number;
+  failed_count: number;
+  /**
+   * Subset of `completed_count` that actually yielded metadata. Most
+   * archives legitimately carry none, so showing only the completed
+   * count would overstate what the run achieved.
+   */
+  with_metadata_count: number;
+  current_target: string | null;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
 
 export interface ImportJobResultEntry {
   filename: string;

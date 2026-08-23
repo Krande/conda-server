@@ -16,8 +16,10 @@ import {
   upstream,
   type AboutResponse,
   type AuditQuery,
+  type BackfillAboutStart,
   type CreateChannelBody,
   type ImportJob,
+  type MaintenanceJob,
   type RecentUpload,
   type ResolveResult,
   type SearchResults,
@@ -186,6 +188,37 @@ export function useDeleteChannel() {
       qc.removeQueries({ queryKey: queryKeys.channel(name) });
       qc.removeQueries({ queryKey: queryKeys.packages(name) });
     },
+  });
+}
+
+export function useBackfillAbout() {
+  return useMutation<BackfillAboutStart, Error, string>({
+    mutationFn: (name) => channels.backfillAbout(name),
+  });
+}
+
+/**
+ * Poll a metadata backfill until it reaches a terminal state.
+ *
+ * Same cadence as the import-job poll. The job's unit of progress is
+ * one archive downloaded from object storage, so it advances in steps
+ * of seconds rather than milliseconds — 2s is plenty and halves the
+ * request count over a long run.
+ */
+export function useBackfillJob(channelName: string, jobId: number | null) {
+  return useQuery<MaintenanceJob>({
+    queryKey: ["backfill-job", channelName, jobId] as const,
+    queryFn: ({ signal }) =>
+      channels.getBackfillJob(channelName, jobId as number, signal),
+    enabled: jobId !== null,
+    refetchInterval: (q) => {
+      const data = q.state.data;
+      if (!data) return 2000;
+      return data.status === "running" || data.status === "pending"
+        ? 2000
+        : false;
+    },
+    refetchIntervalInBackground: false,
   });
 }
 

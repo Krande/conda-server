@@ -8,11 +8,12 @@ from rich import print as rprint
 from sqlalchemy import select
 
 from conda_server import __version__
+from conda_server.backfill import DEFAULT_CONCURRENCY, backfill_about_batch
 from conda_server.config import get_settings
 from conda_server.db import dispose_engine, get_sessionmaker
-from conda_server.indexer import capture_about, reindex_channel
+from conda_server.indexer import reindex_channel
 from conda_server.logging import configure_logging, get_logger
-from conda_server.models import Channel, ChannelMember, Package, PackageVersion, User
+from conda_server.models import Channel, ChannelMember, User
 from conda_server.storage import get_storage
 
 app = typer.Typer(add_completion=False, help="conda-server CLI")
@@ -85,6 +86,10 @@ def backfill_about(
     force: bool = typer.Option(
         False, "--force", help="Re-read archives already inspected (e.g. after a parser fix)."
     ),
+    concurrency: int = typer.Option(
+        DEFAULT_CONCURRENCY,
+        help="Archives to fetch in parallel. Each one is spooled to local disk first.",
+    ),
 ) -> None:
     """Populate package metadata from archives already in storage.
 
@@ -97,13 +102,19 @@ def backfill_about(
 
     It is resumable and safe to re-run — every row it inspects is stamped
     whether or not the archive had an ``about.json``, so a second run
-    skips them instead of re-downloading. ``--limit`` bounds one run's
-    egress; re-run until it reports nothing left.
+    skips them instead of re-downloading. Progress is committed as it
+    goes, so interrupting a run keeps the archives it already read.
+    ``--limit`` bounds one run's egress; re-run until it reports nothing
+    left.
+
+    The same pass is available from the channel admin page, and can be
+    run automatically in small increments — see ``cleanup`` in the
+    configuration reference.
     """
-    asyncio.run(_backfill_about(channel_name, limit, force))
+    asyncio.run(_backfill_about(channel_name, limit, force, concurrency))
 
 
-async def _backfill_about(channel_name: str, limit: int, force: bool) -> None:
+async def _backfill_about(channel_name: str, limit: int, force: bool, concurrency: int) -> None:
     settings = get_settings()
     configure_logging(settings.logging)
     storage = get_storage()
@@ -111,37 +122,25 @@ async def _backfill_about(channel_name: str, limit: int, force: bool) -> None:
     try:
         async with sm() as session:
             channel = await _resolve_channel(session, channel_name)
-            stmt = (
-                select(PackageVersion)
-                .join(Package, PackageVersion.package_id == Package.id)
-                .where(Package.channel_id == channel.id)
-                .order_by(PackageVersion.id)
-                .limit(limit)
+            stats = await backfill_about_batch(
+                session,
+                storage,
+                channel,
+                limit=limit,
+                force=force,
+                concurrency=concurrency,
             )
-            if not force:
-                stmt = stmt.where(PackageVersion.about_fetched_at.is_(None))
-            rows = list((await session.execute(stmt)).scalars())
-            if not rows:
-                rprint(f"[green]nothing to backfill[/green] in {channel_name}")
-                return
 
-            prefix = channel.storage_prefix.strip("/")
-            inspected = failed = with_metadata = 0
-            for row in rows:
-                if await capture_about(storage, prefix, row):
-                    inspected += 1
-                    if row.doc_url or row.home or row.dev_url or row.summary or row.description:
-                        with_metadata += 1
-                else:
-                    failed += 1
-            await session.commit()
+        if not stats.touched:
+            rprint(f"[green]nothing to backfill[/green] in {channel_name}")
+            return
 
         rprint(
             f"[green]backfilled[/green] {channel_name}: "
-            f"{inspected} archive(s) read, {with_metadata} with metadata, "
-            f"{failed} unreadable"
+            f"{stats.inspected} archive(s) read, {stats.with_metadata} with metadata, "
+            f"{stats.failed} unreadable"
         )
-        if len(rows) == limit:
+        if stats.hit_limit:
             rprint(f"[yellow]hit --limit {limit}[/yellow] — re-run to continue")
     finally:
         await dispose_engine()

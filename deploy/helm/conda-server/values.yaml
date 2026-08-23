@@ -42,6 +42,12 @@ app:
   # keep all rows forever (handy if you treat them as audit log).
   cleanupImportJobTtlDays: 30
   cleanupIntervalSeconds: 3600
+  # Versions per channel, per sweep, whose archive is opened to read
+  # the info/about.json metadata that older rows never captured. 0
+  # disables it. This one downloads package archives from object
+  # storage, so it costs bandwidth — off by default, and the channel
+  # admin page has an on-demand button for the same work.
+  cleanupAboutBackfillPerSweep: 0
 
   # "json" for log-aggregator-friendly output, "console" for human dev.
   logFormat: json
