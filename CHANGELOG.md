@@ -2,6 +2,70 @@
 
 
 
+## v0.8.1 (2026-08-23)
+
+### Fix
+
+* fix: read info/about.json through ranged storage reads (#18)
+
+Capturing a package&#39;s info/about.json spooled the entire artifact to a
+temporary file on local disk and then read a few hundred bytes out of it.
+That is the wrong shape of cost: the metadata is tiny and fixed-size, the
+archive is not, and ephemeral disk is a small hard limit that several
+captures can be competing for at once. A server indexing a channel of
+large artifacts can exhaust its own disk allowance reading documentation
+links.
+
+A .conda is a zip, and a zip records where every member lives in a
+central directory at its tail. So the whole archive never has to move:
+head for the size, one ranged read of the tail to parse the directory,
+one ranged read of the info-*.tar.zst member it points at. Measured
+against real conda-forge packages that is 0.5-1.3% of the bytes, two
+requests, and nothing written to disk:
+
+    nodejs 25.8.2        31,271,315 B  -&gt;    171,545 B  (0.549%)
+    python 3.12.13       15,840,187 B  -&gt;    199,735 B  (1.261%)
+    py-rattler 0.23.2    12,459,191 B  -&gt;    126,095 B  (1.012%)
+    alembic 1.18.4          184,763 B  -&gt;     78,395 B  (42.43%)
+
+The cost is flat rather than proportional, so it is small packages that
+show a large percentage — and they were never the problem.
+
+Storage grows one method, get_range, with HTTP range semantics. All four
+backends are obstore-backed, so it is obstore.get_range_async for every
+one of them, including the local filesystem backend, which serves real
+ranges rather than reading the file and slicing it.
+
+Parsing goes through zipfile rather than a hand-written End of Central
+Directory reader, over a small file-like object that presents the archive
+at its true length while holding only the ranges actually fetched. A read
+outside them raises rather than returning short data, and the caller
+widens the tail window and retries — so archive comments and Zip64 are
+handled by the stdlib, and a wrong first guess costs a request rather
+than the metadata.
+
+.tar.bz2 is deliberately left alone. The legacy format is one solid bz2
+stream with no index, so there is nothing for a ranged read to seek to
+and the only route to info/about.json is decompressing from the start.
+That path keeps spooling to a temporary file, and MAX_ABOUT_ARCHIVE_BYTES
+now guards it and only it — dropped from 512 MiB to 64 MiB, because it is
+the path whose cost really is the size of the package and several can be
+in flight at once. Legacy archives past the cap are stamped, not retried,
+exactly as before.
+
+The cap no longer applies to .conda. It existed because reading the
+member meant pulling the object out of storage first; that is no longer
+true, and a ranged read of a 2 GB package costs the same as one of a 2 MB
+package, so declining the large ones would buy nothing.
+
+Unchanged: an object that cannot be fetched is still counted as failed
+and left unstamped so a later pass retries it, a pass is still never
+aborted by one bad archive, and archives that are simply unparseable are
+still stamped as &#34;no metadata&#34; rather than retried forever. A fetch
+failure is now a distinct exception type precisely so those two outcomes
+cannot be confused. ([`368d404`](https://github.com/Krande/conda-server/commit/368d4043e5c66eef4dd31a81352703107d5074e9))
+
+
 ## v0.8.0 (2026-08-23)
 
 ### Feature
