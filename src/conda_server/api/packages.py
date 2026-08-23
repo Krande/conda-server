@@ -142,11 +142,19 @@ def _about_source(ordered: list[Any]) -> Any | None:
     ``ordered`` is already newest-first, so this is a scan rather than a
     second sort: the first version carrying any metadata wins. Versions
     with nothing at all are skipped rather than winning and blanking the
-    page — which matters during rollout, when the newest version predates
-    metadata capture and an older one has been re-uploaded since. Showing
-    the older release's docs link beats showing none, and among versions
-    that *do* carry metadata conda ordering still decides, so this never
-    silently prefers a stale link over a fresh one.
+    page. Showing an older release's docs link beats showing none, and
+    among versions that *do* carry metadata conda ordering still decides,
+    so this never silently prefers a stale link over a fresh one.
+
+    That skip is now defence rather than the common path. The indexer
+    captures metadata for the newest version only — precisely because
+    this function reads no other — so on a channel indexed by a current
+    server the first version scanned is normally the one that answers.
+    It still earns its place: rows captured by earlier servers, and rows
+    filled in by ``conda_server.backfill`` (which inspects every version,
+    not just the newest), both put metadata on older versions, and a
+    newest version whose recipe simply omitted ``about.json`` is a real
+    and permanent case rather than a transitional one.
     """
     for version in ordered:
         if any(getattr(version, field, None) for field in _ABOUT_FIELDS):
