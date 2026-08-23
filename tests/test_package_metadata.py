@@ -27,7 +27,7 @@ from conda_server.db import get_sessionmaker
 from conda_server.indexer import PACKAGE_SUFFIXES, _sync_db_from_repodata, capture_about
 from conda_server.models import Channel, Package, PackageVersion
 from conda_server.storage import build_storage
-from tests.test_package_about import FULL_ABOUT, make_conda, make_conda_blob
+from tests.test_package_about import FULL_ABOUT, make_conda, make_conda_blob, make_tar_bz2
 
 DOCS = "https://example.com/docs/pkg-a/"
 OLD_DOCS = "https://example.com/docs/pkg-a/v1/"
@@ -395,6 +395,37 @@ async def test_oversized_legacy_archive_is_skipped_but_stamped(app, tmp_path):
     assert await capture_about(storage, "idx", row) is True
     assert row.about_fetched_at is not None
     assert row.doc_url is None
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_archive_still_yields_its_metadata(app, tmp_path):
+    """`.tar.bz2` keeps working, by the route it has always taken.
+
+    The legacy format is a solid bz2 stream with no index, so there is
+    nothing for a ranged read to seek to and it is still streamed in full
+    to a temporary file. Asserted end to end, through ``capture_about``,
+    because the format the ranged path *cannot* serve is exactly the one
+    a change like this quietly breaks.
+    """
+    archive = make_tar_bz2(tmp_path / "pkg-a-1.0.0-h0.tar.bz2", FULL_ABOUT)
+    payload = archive.read_bytes()
+    storage = _CountingStorage(build_storage(StorageSettings(backend="local", url=str(tmp_path))))
+    await storage.put("idx/linux-64/pkg-a-1.0.0-h0.tar.bz2", payload)
+    row = PackageVersion(
+        package_id=1,
+        version="1.0.0",
+        build="h0",
+        build_number=0,
+        subdir="linux-64",
+        filename="pkg-a-1.0.0-h0.tar.bz2",
+        size=len(payload),
+    )
+
+    assert await capture_about(storage, "idx", row) is True
+
+    assert row.doc_url == DOCS
+    assert row.summary == "A small example package."
+    assert storage.archive_opens == ["idx/linux-64/pkg-a-1.0.0-h0.tar.bz2"]
 
 
 class _ByteCountingStorage:
