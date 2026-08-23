@@ -26,6 +26,7 @@ ACTIONS = frozenset(
         "channel.create",
         "channel.delete",
         "channel.reindex",
+        "channel.backfill_about",
         "package.upload",
         "package.delete",
         "package.import",

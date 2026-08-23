@@ -78,9 +78,22 @@ class CleanupSettings(BaseSettings):
     # 0 disables the sweep (rows accumulate forever — useful for audit
     # builds that prefer to keep the full history).
     import_job_ttl_days: int = 30
-    # Sweep cadence. The sweep is cheap (single DELETE statement), so
+    # Sweep cadence. The job prune is cheap (single DELETE statement), so
     # an hourly cycle is fine even if there's nothing to do.
     interval_seconds: int = 3600
+    # Versions per channel, per sweep, to open for info/about.json
+    # metadata that was never captured (see conda_server.backfill).
+    #
+    # Off by default, and deliberately so: unlike the prune above this
+    # sweep downloads package archives from object storage, which costs
+    # real bandwidth and, on metered storage, real money. Nobody should
+    # discover it by upgrading. Set it to a small number to let a
+    # channel fill its metadata in gradually, or leave it at 0 and use
+    # the admin page button or the CLI when you want the work done.
+    #
+    # A useful value is small: at the default hourly cadence, 25 clears
+    # 600 versions a day per channel without a visible bandwidth spike.
+    about_backfill_per_sweep: int = 0
 
 
 class Settings(BaseSettings):

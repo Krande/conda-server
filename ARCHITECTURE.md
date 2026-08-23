@@ -64,9 +64,23 @@ artifact rather than one per artifact in the channel. Archives above
 path reads its own metadata from the copy already spooled to `/tmp`, so it costs
 no extra fetch at all.
 
-That bound means rows indexed before this existed stay blank; run
-`conda-server backfill-about <channel>` to open the archives already in storage.
-It is resumable and stamps every row it inspects, so re-runs skip them.
+That bound means rows indexed before this existed stay blank. Filling them in
+is a separate, explicit pass (`conda_server.backfill`), available three ways
+that all share one runner and one safety property:
+
+- **Channel admin page** — a "Backfill package metadata" button that starts a
+  background `MaintenanceJob` and reports progress while it runs. The usual
+  way to do it.
+- **`conda-server backfill-about <channel>`** — the same pass from the CLI.
+- **`cleanup.about_backfill_per_sweep`** — an opt-in trickle that opens a few
+  archives per channel on each cleanup tick, so a deployment heals without
+  anyone pressing anything. **Off by default**: unlike every other sweep it
+  downloads package archives, which costs bandwidth.
+
+The safety property is the `about_fetched_at` stamp: every row inspected is
+stamped whether or not the archive had an `about.json`, so the three can never
+duplicate each other's work and any of them can be re-run for free. Progress is
+committed as it goes, so a pass that is interrupted keeps what it already read.
 
 ## Data model (initial)
 
@@ -78,7 +92,7 @@ It is resumable and stamps every row it inspects, so re-runs skip them.
 
 Since implemented (beyond this initial cut): per-channel member ACLs,
 mirror/import-from-upstream channels, upload quotas, and an audit log —
-see the `ChannelMember`, `AuditLog`, and `ImportJob` models.
+see the `ChannelMember`, `AuditLog`, `ImportJob`, and `MaintenanceJob` models.
 
 ## Directory layout
 
@@ -91,7 +105,9 @@ src/conda_server/
   storage.py        obstore wrapper
   indexer.py        py-rattler + rattler-index
   auth.py           authlib OIDC + bearer tokens
-  cli.py            Typer CLI (serve / reindex / migrate / backfill-about)
+  cli.py            Typer CLI (serve / reindex / backfill-about / channel)
+  backfill.py       shared info/about.json backfill pass (CLI, admin job, sweep)
+  cleanup.py        periodic in-pod maintenance sweeps
   package_about.py  info/about.json extraction from .conda / .tar.bz2
   logging.py        structlog setup
   api/              routers (health, channels, repodata, packages, auth)

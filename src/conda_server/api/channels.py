@@ -21,7 +21,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from conda_server import audit
 from conda_server.auth import (
@@ -34,6 +34,12 @@ from conda_server.auth import (
     require_channel_writer,
     visible_channel_or_404,
     visible_channels_stmt,
+)
+from conda_server.backfill import (
+    DEFAULT_CONCURRENCY,
+    BackfillStats,
+    backfill_about_batch,
+    count_pending,
 )
 from conda_server.config import get_settings
 from conda_server.db import SessionDep, get_sessionmaker
@@ -52,6 +58,7 @@ from conda_server.models import (
     Channel,
     ChannelMember,
     ImportJob,
+    MaintenanceJob,
     Package,
     PackageVersion,
     User,
@@ -1519,6 +1526,255 @@ async def delete_package(
         user=user.email,
     )
     background.add_task(_reindex_background, channel.name)
+
+
+# --- about-metadata backfill -------------------------------------------
+
+#: Rows one admin-triggered backfill run will open. The pass is
+#: resumable, so this is a bound on a single click rather than on the
+#: total work: when a run stops here the response says so and the
+#: operator can start another. It exists because each row means pulling
+#: a package archive out of object storage, and an unbounded click on a
+#: large channel is an unpleasant surprise on metered egress.
+_BACKFILL_JOB_LIMIT = 1000
+
+#: Strong refs to in-flight backfill runners, for the same reason as
+#: ``_RUNNING_IMPORTS``: asyncio.create_task only holds a weak ref, and
+#: a task nothing strong-refs can be collected mid-run.
+_RUNNING_BACKFILLS: set[asyncio.Task[None]] = set()
+
+_BACKFILL_KIND = "about_backfill"
+
+
+class MaintenanceJobOut(BaseModel):
+    id: int
+    kind: str
+    channel: str | None
+    status: str
+    total_count: int
+    completed_count: int
+    failed_count: int
+    with_metadata_count: int
+    current_target: str | None
+    error: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+def _maintenance_job_out(job: MaintenanceJob, channel_name: str | None) -> MaintenanceJobOut:
+    return MaintenanceJobOut(
+        id=job.id,
+        kind=job.kind,
+        channel=channel_name,
+        status=job.status,
+        total_count=job.total_count,
+        completed_count=job.completed_count,
+        failed_count=job.failed_count,
+        with_metadata_count=job.with_metadata_count,
+        current_target=job.current_target,
+        error=job.error,
+        created_at=job.created_at,
+        finished_at=job.finished_at,
+    )
+
+
+@router.post("/{name}/backfill-about", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_about_backfill(
+    name: str,
+    session: SessionDep,
+    user: Annotated[User, Depends(current_user)],
+    channel: Annotated[Channel, Depends(require_channel_owner)],
+) -> dict[str, Any]:
+    """Start a pass that reads package metadata from stored archives.
+
+    Versions indexed before the server captured ``info/about.json`` have
+    no docs link, homepage or summary, and a reindex will not give them
+    one — it only opens archives for versions that were added or
+    changed. This is the deliberate pass over the rest.
+
+    Returns immediately with a job id; the work runs in the background
+    and the job row carries progress. Safe to run repeatedly: versions
+    already inspected are skipped, so a second run only picks up what
+    the first did not reach.
+    """
+    _ = name
+    if channel.mirror_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="mirror channels have no stored versions to backfill",
+        )
+
+    # One at a time per channel. Two concurrent passes would select
+    # overlapping rows and download the same archives twice — correct,
+    # thanks to the stamp, but paid for twice.
+    running = await session.scalar(
+        select(func.count(MaintenanceJob.id)).where(
+            MaintenanceJob.channel_id == channel.id,
+            MaintenanceJob.kind == _BACKFILL_KIND,
+            MaintenanceJob.status.in_(["pending", "running"]),
+        )
+    )
+    if running:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="a metadata backfill is already running for this channel",
+        )
+
+    pending = await count_pending(session, channel)
+    if not pending:
+        return {
+            "status": "up-to-date",
+            "channel": channel.name,
+            "pending": 0,
+            "job_id": None,
+        }
+
+    job = MaintenanceJob(
+        kind=_BACKFILL_KIND,
+        channel_id=channel.id,
+        user_id=user.id,
+        status="pending",
+        total_count=min(pending, _BACKFILL_JOB_LIMIT),
+    )
+    session.add(job)
+    await audit.record(
+        session,
+        user,
+        "channel.backfill_about",
+        channel_name=channel.name,
+        meta={"pending": pending, "limit": _BACKFILL_JOB_LIMIT},
+    )
+    await session.commit()
+    await session.refresh(job)
+
+    task = asyncio.create_task(
+        _run_about_backfill(job_id=job.id, channel_id=channel.id, channel_name=channel.name)
+    )
+    _RUNNING_BACKFILLS.add(task)
+    task.add_done_callback(_RUNNING_BACKFILLS.discard)
+
+    log.info(
+        "about.backfill_enqueued",
+        job_id=job.id,
+        channel=channel.name,
+        pending=pending,
+        user=user.email,
+    )
+    return {
+        "status": "accepted",
+        "job_id": job.id,
+        "channel": channel.name,
+        "pending": pending,
+        "status_url": f"/api/channels/{channel.name}/backfill-about/jobs/{job.id}",
+    }
+
+
+@router.get(
+    "/{name}/backfill-about/jobs/{job_id}",
+    response_model=MaintenanceJobOut,
+)
+async def get_about_backfill_job(
+    name: str,
+    job_id: int,
+    session: SessionDep,
+    channel: Annotated[Channel, Depends(require_channel_owner)],
+) -> MaintenanceJobOut:
+    """Progress + outcome for a backfill job. Polled by the UI."""
+    _ = name
+    result = await session.execute(
+        select(MaintenanceJob).where(
+            MaintenanceJob.id == job_id,
+            MaintenanceJob.channel_id == channel.id,
+            MaintenanceJob.kind == _BACKFILL_KIND,
+        )
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="backfill job not found",
+        )
+    return _maintenance_job_out(job, channel.name)
+
+
+async def _run_about_backfill(*, job_id: int, channel_id: int, channel_name: str) -> None:
+    """Background runner for one admin-triggered backfill.
+
+    Owns its own sessions — the request that created the job is long
+    gone. The batch runner commits the version rows as it goes, and this
+    mirrors those commits onto the job row so the UI's poll shows real
+    progress rather than jumping from 0 to done.
+    """
+    sm = get_sessionmaker()
+    storage = get_storage()
+
+    async with sm() as session:
+        job = await session.get(MaintenanceJob, job_id)
+        if job is None:
+            log.warning("about.backfill_job_missing", job_id=job_id)
+            return
+        job.status = "running"
+        await session.commit()
+
+    try:
+        async with sm() as session:
+            channel = await session.get(Channel, channel_id)
+            if channel is None:
+                raise RuntimeError("channel disappeared")
+
+            async def _on_progress(stats: BackfillStats) -> None:
+                # Separate session: the batch runner owns `session` and
+                # is mid-transaction on the version rows.
+                async with sm() as progress_session:
+                    j = await progress_session.get(MaintenanceJob, job_id)
+                    if j is None:
+                        return
+                    j.completed_count = stats.inspected
+                    j.failed_count = stats.failed
+                    j.with_metadata_count = stats.with_metadata
+                    await progress_session.commit()
+
+            stats = await backfill_about_batch(
+                session,
+                storage,
+                channel,
+                limit=_BACKFILL_JOB_LIMIT,
+                concurrency=DEFAULT_CONCURRENCY,
+                on_progress=_on_progress,
+            )
+
+        async with sm() as session:
+            j = await session.get(MaintenanceJob, job_id)
+            if j is not None:
+                j.status = "completed"
+                j.completed_count = stats.inspected
+                j.failed_count = stats.failed
+                j.with_metadata_count = stats.with_metadata
+                j.total_count = stats.touched
+                # Not an error — the run hit its own bound. Surfacing it
+                # here is how the operator learns to click again.
+                if stats.hit_limit:
+                    j.error = "stopped at this run's limit; run again to continue"
+                j.finished_at = _dt.datetime.now(_dt.UTC)
+                await session.commit()
+
+        log.info(
+            "about.backfill_completed",
+            job_id=job_id,
+            channel=channel_name,
+            inspected=stats.inspected,
+            with_metadata=stats.with_metadata,
+            failed=stats.failed,
+        )
+    except Exception as exc:
+        log.exception("about.backfill_failed", job_id=job_id, channel=channel_name)
+        async with sm() as session:
+            j = await session.get(MaintenanceJob, job_id)
+            if j is not None:
+                j.status = "failed"
+                j.error = str(exc)
+                j.finished_at = _dt.datetime.now(_dt.UTC)
+                await session.commit()
 
 
 async def _reindex_background(channel_name: str) -> None:

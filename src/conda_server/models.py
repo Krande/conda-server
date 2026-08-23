@@ -10,11 +10,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -167,6 +169,18 @@ class PackageVersion(Base):
             "subdir",
             name="uq_packageversion_unique",
         ),
+        # The about-metadata backfill's driving query is "versions in this
+        # channel nobody has inspected yet". Without an index that walks
+        # every row in the table on every batch and every progress count.
+        # Indexing only the un-inspected rows keeps it proportional to the
+        # work remaining rather than to the size of the channel, and the
+        # index shrinks to nothing once a channel is fully backfilled.
+        Index(
+            "ix_package_versions_about_pending",
+            "package_id",
+            postgresql_where=text("about_fetched_at IS NULL"),
+            sqlite_where=text("about_fetched_at IS NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -252,6 +266,61 @@ class ImportJob(Base):
     # the old synchronous endpoint's `results` payload so the UI can
     # render it once the job lands.
     results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(String(2048))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MaintenanceJob(Base):
+    """A long-running housekeeping pass, tracked so the UI can poll it.
+
+    Distinct from ``ImportJob``, which models one specific operation and
+    requires an ``upstream_url``. This one is deliberately generic: the
+    work is described by ``kind``, and the counters are the ones any
+    "walk a set of rows and do something to each" sweep needs. Adding a
+    second kind should mean a new runner and no schema change.
+
+    Kinds in use:
+
+    * ``about_backfill`` — open archives already in storage to read the
+      ``info/about.json`` metadata for versions indexed before that
+      metadata was captured.
+
+    Lifecycle: pending → running → (completed | failed), same as
+    ``ImportJob``, including the startup sweep that fails rows stranded
+    by a restart. Runners are in-process asyncio tasks, not durable
+    workers, so a row left ``running`` after a restart is a lie the
+    lifespan hook corrects.
+    """
+
+    __tablename__ = "maintenance_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    # Every kind so far is per-channel. Nullable so a future
+    # server-wide sweep can use the same table without a migration.
+    channel_id: Mapped[int | None] = mapped_column(
+        ForeignKey("channels.id", ondelete="CASCADE"), index=True
+    )
+    # SET NULL so deleting a user doesn't drop the audit-relevant row.
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", index=True
+    )  # pending | running | completed | failed
+    # How many rows the run intends to touch, learned when the runner
+    # counts them. Zero until then, so the UI shows a spinner rather
+    # than a bogus 0/0 bar.
+    total_count: Mapped[int] = mapped_column(Integer, default=0)
+    completed_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Subset of completed_count that yielded something worth showing.
+    # For about_backfill most archives legitimately carry nothing, so
+    # "600 read, 140 with metadata" is the honest summary and "600
+    # completed" on its own reads like a much better result than it is.
+    with_metadata_count: Mapped[int] = mapped_column(Integer, default=0)
+    current_target: Mapped[str | None] = mapped_column(String(512))
     error: Mapped[str | None] = mapped_column(String(2048))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
