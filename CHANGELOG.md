@@ -2,6 +2,54 @@
 
 
 
+## v0.8.2 (2026-08-23)
+
+### Fix
+
+* fix: capture info/about.json only for the version that is rendered (#19)
+
+The indexer opened an archive for every version it added, and a package
+page renders exactly one of them. _about_source picks the newest version
+by conda ordering and reads no other, so every capture of an older
+version bought metadata nothing asks for. A channel holds several
+versions of each package, and that multiple was the whole waste: on a
+channel of 125 artifacts spanning 20 packages, roughly five archives were
+opened for every one whose contents could ever be displayed.
+
+Capture is now decided per package rather than per row. The upsert loop
+records which packages moved; once every subdir has been read — and only
+then, because a package&#39;s version list is not complete until it has —
+the newest version is computed from the package&#39;s whole set of rows and
+its artifacts are the ones opened.
+
+Computing it from the whole set, rather than from the rows the loop
+happened to touch, is what makes &#34;newest&#34; safe to depend on. It is not a
+fixed property: a rebuild of an older version can land after a newer one
+already shipped, and it is the most recent upload while being the least
+interesting version. The same rule covers the other direction — a version
+that becomes the newest is captured on the pass that adds it, because its
+package is touched and the list is recomputed.
+
+Artifacts, plural: one version can be several artifacts across subdirs,
+and all of them are opened. Opening only one would leave a package&#39;s
+metadata depending on which subdir happened to sort first and on that
+artifact never being removed, which is a lot of fragility to buy back a
+read that now costs a few KB.
+
+Versions that are not the newest are left uninspected and unstamped.
+That is deliberate: conda_server.backfill still inspects every version,
+so a channel that wants full coverage asks for it explicitly, and the
+rows it fills are what keep _about_source&#39;s older-version fallback
+meaningful rather than dead. The fallback also still covers the case its
+docstring did not: a newest version whose recipe simply omitted
+about.json, which is permanent rather than transitional.
+
+The steady-state guarantee is unchanged — an untouched package is never
+looked at, so a reindex of an unchanged channel still opens zero archives
+— and so is the recapture rule for replaced bytes, which now applies to
+the newest version, the one whose metadata is on screen. ([`abe7efb`](https://github.com/Krande/conda-server/commit/abe7efb5adc204a6d2bb31fd36084d670c5a6c1d))
+
+
 ## v0.8.1 (2026-08-23)
 
 ### Fix
