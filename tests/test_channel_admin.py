@@ -175,7 +175,14 @@ def _stub_index(
     version: str = "1.0",
     build: str = "0",
 ):
-    """Return a stub that mimics rattler.IndexJson enough for the handler."""
+    """A stand-in for ``rattler.IndexJson``.
+
+    Carries every field the upload path reads, including the ones that
+    only matter once the record reaches repodata. A stub missing them
+    does not fail loudly — the handler catches the AttributeError and
+    files it as a per-file error — so an incomplete one here would report
+    the upload as stored while quietly publishing nothing.
+    """
 
     class _Stub:
         pass
@@ -185,7 +192,25 @@ def _stub_index(
     stub.name = name
     stub.version = version
     stub.build = build
+    stub.build_number = 0
+    stub.depends = []
+    stub.constrains = []
+    stub.timestamp = None
+    stub.license = None
+    stub.license_family = None
+    stub.platform = None
+    stub.arch = None
+    stub.track_features = None
     return stub
+
+
+async def _published(store, prefix: str, subdir: str) -> dict:
+    """The records repodata.json currently lists for a subdir, by filename."""
+    import json
+
+    raw = await store.get(f"{prefix}/{subdir}/repodata.json")
+    data = json.loads(raw)
+    return {**(data.get("packages") or {}), **(data.get("packages.conda") or {})}
 
 
 @pytest.mark.asyncio
@@ -225,11 +250,19 @@ async def test_upload_extracts_subdir_and_stores(app, client, tmp_path):
         assert result["subdir"] == "linux-64"
         assert result["size"] == len(body)
         assert result["name"] == "xtensor"
-        assert mocked_rx.call_count == 1
-        assert mocked_rx.call_args.args == ("up",)
+        assert "error" not in result
 
         stored = await store.get("up/linux-64/xtensor-0.25.0-hf036a51_0.conda")
         assert stored == body
+
+        # The response already means "listed". No background task ran, and
+        # none needs to: the package is in repodata by the time the client
+        # is told the upload succeeded.
+        assert mocked_rx.call_count == 0
+        published = await _published(store, "up", "linux-64")
+        assert "xtensor-0.25.0-hf036a51_0.conda" in published
+        assert published["xtensor-0.25.0-hf036a51_0.conda"]["size"] == len(body)
+        assert await store.head("up/linux-64/repodata.json.zst") is not None
     finally:
         storage_module.reset_storage()
 
@@ -287,9 +320,9 @@ async def test_upload_multiple_files_in_one_request(app, client, tmp_path):
         ]:
             stored = await store.get(f"multi/{subdir}/{filename}")
             assert stored is not None and len(stored) > 0
+            assert filename in await _published(store, "multi", subdir)
 
-        # One reindex for the whole batch, not three.
-        assert mocked_rx.call_count == 1
+        assert mocked_rx.call_count == 0
     finally:
         storage_module.reset_storage()
 
@@ -335,8 +368,10 @@ async def test_upload_partial_failure_still_stores_good_file(app, client, tmp_pa
         assert by_name["good-1.0-0.conda"]["status"] == "stored"
         assert by_name["bad-1.0-0.conda"]["status"] == "error"
         assert "corrupt" in by_name["bad-1.0-0.conda"]["error"]
-        assert mocked_rx.call_count == 1
+        assert mocked_rx.call_count == 0
         assert await store.head("part/linux-64/good-1.0-0.conda") is not None
+        # The good file is published even though its neighbour was not.
+        assert "good-1.0-0.conda" in await _published(store, "part", "linux-64")
     finally:
         storage_module.reset_storage()
 
@@ -369,6 +404,8 @@ async def test_upload_skips_reindex_when_all_fail(app, client, tmp_path):
         assert resp.status_code == 202
         assert resp.json()["results"][0]["status"] == "error"
         assert mocked_rx.call_count == 0
+        # Nothing stored means nothing published — no empty index written.
+        assert await store.head("allbad/linux-64/repodata.json") is None
     finally:
         storage_module.reset_storage()
 

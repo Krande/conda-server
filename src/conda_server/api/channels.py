@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as _dt
+import hashlib
 import os
 import pathlib
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -22,6 +24,7 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from conda_server import audit
 from conda_server.auth import (
@@ -43,7 +46,14 @@ from conda_server.backfill import (
 )
 from conda_server.config import get_settings
 from conda_server.db import SessionDep, get_sessionmaker
-from conda_server.indexer import apply_about, reindex_channel
+from conda_server.indexer import (
+    apply_about,
+    load_repodata_entries,
+    reindex_channel,
+    repodata_entry,
+    upsert_version,
+    write_repodata,
+)
 from conda_server.logging import get_logger
 from conda_server.metrics import (
     PACKAGE_DELETES,
@@ -63,8 +73,8 @@ from conda_server.models import (
     PackageVersion,
     User,
 )
-from conda_server.package_about import read_package_about
-from conda_server.storage import get_storage
+from conda_server.package_about import PackageAbout, read_package_about
+from conda_server.storage import Storage, get_storage
 
 router = APIRouter(prefix="/channels", tags=["channels"])
 log = get_logger(__name__)
@@ -488,7 +498,6 @@ async def _assert_not_last_owner(session, channel_id: int) -> None:
 @router.post("/{name}/packages", status_code=status.HTTP_202_ACCEPTED)
 async def upload_packages(
     name: str,
-    background: BackgroundTasks,
     session: SessionDep,
     user: Annotated[User, Depends(current_user)],
     channel: Annotated[Channel, Depends(require_channel_writer)],
@@ -498,10 +507,18 @@ async def upload_packages(
 
     The server extracts each archive's ``info/index.json`` via rattler and
     uses the declared subdir to decide where to store it — the client
-    doesn't pick. A single background reindex runs after any successful
-    upload so repodata.json reflects the new bytes. Requires writer+
-    access on the channel; mirror channels are rejected regardless
-    (upstream is authoritative).
+    doesn't pick. Requires writer+ access on the channel; mirror channels
+    are rejected regardless (upstream is authoritative).
+
+    **The response means the package is listed, not merely received.**
+    repodata is updated before this returns, rather than from a task
+    scheduled to run after it. Deferring that work makes the success
+    reply a prediction: the artifact is in object storage and the index
+    is not, so anything that stops the process in between — a crash, an
+    eviction, a rollout — leaves a package that was accepted, is paid
+    for, and can never be installed. Nothing in the reply distinguishes
+    that from a publish that worked, which is what makes it worth
+    ordering the writes rather than the acknowledgements.
 
     Partial success is allowed: individual file errors are reported in
     the ``results`` array while successfully-stored files still land.
@@ -539,7 +556,7 @@ async def upload_packages(
 
     storage = get_storage()
     results: list[dict[str, Any]] = []
-    stored_any = False
+    stored: list[_StoredPackage] = []
     running_total = 0
 
     for upload in files:
@@ -547,7 +564,7 @@ async def upload_packages(
         entry: dict[str, Any] = {"filename": filename}
         try:
             remaining_total = upload_cfg.max_total_bytes - running_total
-            written = await _store_one_package(
+            placed = await _store_one_package(
                 upload,
                 channel,
                 storage,
@@ -556,8 +573,8 @@ async def upload_packages(
                 max_file_bytes=upload_cfg.max_file_bytes,
                 max_total_bytes=remaining_total,
             )
-            running_total += written
-            stored_any = True
+            running_total += placed.size
+            stored.append(placed)
         except HTTPException:
             raise
         except Exception as exc:
@@ -565,8 +582,8 @@ async def upload_packages(
             entry["error"] = str(exc)
         results.append(entry)
 
-    if stored_any:
-        background.add_task(_reindex_background, channel.name)
+    if stored:
+        await _publish_uploads(session, storage, channel, stored)
 
     for r in results:
         if r.get("status") == "stored":
@@ -590,6 +607,24 @@ async def upload_packages(
     return {"channel": channel.name, "results": results}
 
 
+@dataclass(frozen=True)
+class _StoredPackage:
+    """One archive that reached object storage, and what publishing it needs.
+
+    Everything here is read from the spooled file while it is still on
+    disk, because that is the only moment the bytes are local. Doing it
+    then means publishing never has to fetch the archive back — which is
+    what keeps an upload's cost proportional to the upload.
+    """
+
+    subdir: str
+    filename: str
+    size: int
+    #: The repodata.json record, ready to merge into the subdir's index.
+    record: dict[str, Any]
+    about: PackageAbout
+
+
 async def _store_one_package(
     upload: UploadFile,
     channel: Channel,
@@ -599,11 +634,17 @@ async def _store_one_package(
     *,
     max_file_bytes: int,
     max_total_bytes: int,
-) -> int:
-    """Spool upload → /tmp → read subdir via rattler → stream into storage.
+) -> _StoredPackage:
+    """Spool upload → temp file → read metadata via rattler → stream into storage.
 
-    Returns the number of bytes stored. Side-effect: mutates ``entry`` with
-    the outcome (status, subdir, size). Temp file is always cleaned up.
+    Side-effect: mutates ``entry`` with the outcome (status, subdir,
+    size) for the response body. The temp file is always cleaned up, and
+    only one exists at a time.
+
+    Hashes are computed during the spool rather than by re-reading the
+    file: repodata records carry sha256 and md5, the bytes are already
+    streaming past, and the alternative is a second full pass over an
+    archive that can be a gigabyte.
 
     Enforces two caps: ``max_file_bytes`` for this single file, and
     ``max_total_bytes`` as the remaining budget within the batch. Whichever
@@ -616,13 +657,21 @@ async def _store_one_package(
     if parse_conda_filename(filename) is None:
         raise ValueError("filename must be <name>-<version>-<build>.<conda|tar.bz2>")
 
-    # rattler reads from a filesystem path, so spool the upload to /tmp
-    # (emptyDir in prod). Keeps us off the memory path and lets us stream
-    # the same file into object storage once the subdir is known.
+    # rattler reads from a filesystem path, so the upload has to be spooled
+    # somewhere local. Keeps us off the memory path and lets us stream the
+    # same file into object storage once the subdir is known.
+    #
+    # Deliberately the platform temp directory rather than a hardcoded
+    # "/tmp": that honours TMPDIR, which is how a deployment points this at
+    # a mounted volume instead of the container's own writable layer. Where
+    # those bytes land is the operator's decision, and hardcoding the path
+    # took it away from them.
     suffix = ".conda" if filename.endswith(".conda") else ".tar.bz2"
-    fd, tmp_path = tempfile.mkstemp(suffix=suffix, dir="/tmp")
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     try:
         spooled = 0
+        sha = hashlib.sha256()
+        md5 = hashlib.md5()
         with os.fdopen(fd, "wb") as tmp:
             while True:
                 chunk = await upload.read(_UPLOAD_CHUNK)
@@ -633,6 +682,8 @@ async def _store_one_package(
                     raise ValueError(f"file exceeds {max_file_bytes // (1024 * 1024)} MiB limit")
                 if spooled > max_total_bytes:
                     raise ValueError("request exceeds aggregate upload limit")
+                sha.update(chunk)
+                md5.update(chunk)
                 tmp.write(chunk)
 
         try:
@@ -677,10 +728,87 @@ async def _store_one_package(
                 "build": index.build,
             }
         )
-        return written
+        return _StoredPackage(
+            subdir=subdir,
+            filename=filename,
+            size=written,
+            record=repodata_entry(
+                index=index,
+                filename=filename,
+                size=written,
+                sha256=sha.hexdigest(),
+                md5=md5.hexdigest(),
+            ),
+            # Free here and expensive later: the archive is on local disk
+            # for exactly this long, and reading about.json now is what
+            # spares the backfill sweep from fetching it back out of
+            # object storage to render a homepage link.
+            about=read_package_about(tmp_path),
+        )
     finally:
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
+
+
+_REPODATA_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _repodata_lock(channel_id: int) -> asyncio.Lock:
+    """Serialise read-modify-write of one channel's repodata in this process.
+
+    Two uploads landing in the same subdir at once would otherwise race:
+    both read the index, each adds its own record, and whichever writes
+    second silently drops the other's package — the same invisible loss
+    this endpoint's ordering exists to prevent, arrived at by a different
+    route.
+
+    In-process only. It does not coordinate across replicas, and it is
+    not trying to: a channel has one writer in the deployments this
+    serves, and where that is not true a reindex reconciles storage back
+    into the index. Closing the reachable case is worth more than leaving
+    it open on the grounds that the unreachable one stays open.
+    """
+    lock = _REPODATA_LOCKS.get(channel_id)
+    if lock is None:
+        lock = _REPODATA_LOCKS[channel_id] = asyncio.Lock()
+    return lock
+
+
+async def _publish_uploads(
+    session: AsyncSession,
+    storage: Storage,
+    channel: Channel,
+    stored: list[_StoredPackage],
+) -> None:
+    """Merge stored archives into repodata and the database.
+
+    Cost is the size of the affected subdirs' indexes — a few hundred
+    kilobytes of JSON — and no artifact is fetched, so publishing a small
+    package stays a small operation no matter how large the channel has
+    grown.
+
+    Object storage is written before the database because it is what
+    clients read. A crash between the two leaves a package listed and
+    installable but missing from the server's own listing, which the next
+    reindex repairs; the reverse order would leave the row claiming a
+    package that no client can find.
+    """
+    prefix = channel.storage_prefix.strip("/")
+    by_subdir: dict[str, list[_StoredPackage]] = {}
+    for item in stored:
+        by_subdir.setdefault(item.subdir, []).append(item)
+
+    async with _repodata_lock(channel.id):
+        for subdir, items in by_subdir.items():
+            entries = await load_repodata_entries(storage, prefix, subdir)
+            for item in items:
+                entries[item.filename] = item.record
+            await write_repodata(storage, prefix, subdir, entries)
+
+    for item in stored:
+        row = await upsert_version(session, channel, item.subdir, item.filename, item.record)
+        apply_about(row, item.about)
+    channel.repodata_updated_at = _dt.datetime.now(_dt.UTC)
 
 
 def _package_name_str(name: Any) -> str:
@@ -804,8 +932,18 @@ def _virtual_packages_for(subdirs: set[str]) -> list[rattler.GenericVirtualPacka
 # MB of repodata on every call (and OOM-killed the pod when multiple
 # platforms were toggled). Keeping one process-wide instance lets the
 # in-memory cache survive across requests for the lifetime of the pod.
+#: Where the solver's upstream-repodata cache lives.
+#:
+#: Under the platform temp directory rather than a hardcoded "/tmp" so a
+#: deployment can move it with TMPDIR. That matters more here than for
+#: the short-lived spool files: this cache holds parsed repodata for
+#: every upstream subdir a preview has touched, it is never pruned, and
+#: a large upstream contributes hundreds of megabytes per platform. On a
+#: container whose writable layer is subject to a fixed ephemeral-storage
+#: quota, an unbounded cache sharing that quota is a slow way to reach
+#: it, and pointing TMPDIR at a sized volume is how an operator opts out.
 _GATEWAY: rattler.Gateway | None = None
-_GATEWAY_CACHE_DIR = pathlib.Path("/tmp/rattler-cache")
+_GATEWAY_CACHE_DIR = pathlib.Path(tempfile.gettempdir()) / "rattler-cache"
 
 
 def _get_solver_gateway() -> rattler.Gateway:
@@ -841,8 +979,10 @@ async def import_preview(
     Mirror channels are rejected for the same reason as ``import``.
 
     Network egress: the solve fetches the upstream's repodata into a
-    rattler cache under ``/tmp``. First call per pod for a given
-    upstream subdir takes a few seconds; subsequent calls are warm.
+    rattler cache under the temp directory (see ``_GATEWAY_CACHE_DIR``).
+    First call per pod for a given upstream subdir takes a few seconds;
+    subsequent calls are warm, at the cost of disk that is never
+    reclaimed short of restarting the pod.
     """
     _ = name, user
     if channel.mirror_url:
@@ -1312,7 +1452,7 @@ async def _import_one_package(
     upstream_object_url = f"{upstream_url}/{subdir}/{filename}"
 
     suffix = ".conda" if filename.endswith(".conda") else ".tar.bz2"
-    fd, tmp_path = tempfile.mkstemp(suffix=suffix, dir="/tmp")
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     try:
         spooled = 0
         try:
@@ -1398,7 +1538,7 @@ async def _import_one_package(
             info={"name": fn_name, "version": fn_version, "build": fn_build},
             imported_from=upstream_object_url,
         )
-        # The archive is already spooled to /tmp for the index.json read,
+        # The archive is already spooled locally for the index.json read,
         # so pulling info/about.json out of it costs one more seek into
         # the same file — no second fetch, no storage round-trip. Stamping
         # about_fetched_at here is also what stops the background reindex
