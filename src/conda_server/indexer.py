@@ -1,11 +1,19 @@
 """Channel reindexing — scans object storage, updates repodata.json, syncs DB.
 
-The heavy lifting (parsing .conda archives, generating repodata.json + zst) is
-delegated to ``rattler.index``. For the S3 backend we use ``index_s3`` which
-operates directly against the bucket. For the local backend we point
-``index_fs`` at the local path — no copy required. For Azure / GCS we fall
-back to mirroring the channel into a temp directory, indexing there, and
-uploading the generated repodata artifacts back.
+Three routes in, chosen by backend, and the difference between them is
+where the archives already are. For the local backend we point rattler's
+``index_fs`` at the path — the files are on disk already, so no copy. For
+S3 we use ``index_s3``, which works against the bucket in place. Every
+other backend has no in-place indexer, and for those we build repodata
+ourselves from archive metadata; see ``_reindex_via_metadata`` for why
+that is not simply "download the channel and run ``index_fs`` over it".
+
+The constraint the generic route exists to respect: **reindexing must
+not scale in disk with the size of the channel.** A server that stages
+artifacts locally to index them holds the entire channel on ephemeral
+disk, which is a per-pod quota that other things share and that a
+container cannot grow. Metadata is kilobytes per package; payloads are
+not, and repodata needs none of them.
 
 After indexing, the generated ``repodata.json`` is parsed and the rows in the
 ``packages`` / ``package_versions`` tables are brought in sync — added,
@@ -24,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import json
 import os
 import tempfile
@@ -32,7 +41,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import rattler
 import rattler.index
+import zstandard
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,13 +89,6 @@ SUBDIRS = (
 
 PACKAGE_SUFFIXES = (".conda", ".tar.bz2")
 
-REPODATA_ARTIFACTS = (
-    "repodata.json",
-    "repodata.json.zst",
-    "current_repodata.json",
-    "current_repodata.json.zst",
-)
-
 
 @dataclass
 class IndexResult:
@@ -108,7 +112,7 @@ async def reindex_channel(
     elif settings.backend == "s3":
         await _reindex_s3(settings, channel)
     else:
-        await _reindex_via_temp(storage, channel)
+        await _reindex_via_metadata(session, storage, channel)
 
     stats = await _sync_db_from_repodata(session, storage, channel)
     channel.repodata_updated_at = datetime.now(UTC)
@@ -135,31 +139,336 @@ async def _reindex_s3(settings: StorageSettings, channel: Channel) -> None:
     await rattler.index.index_s3(channel_url, credentials=creds_arg)
 
 
-async def _reindex_via_temp(storage: Storage, channel: Channel) -> None:
-    """Generic fallback: mirror the channel to a temp dir, index, upload back."""
+async def _reindex_via_metadata(
+    session: AsyncSession,
+    storage: Storage,
+    channel: Channel,
+) -> None:
+    """Generic fallback: rebuild repodata from archive metadata alone.
+
+    **This path must never stage the channel on local disk.** The obvious
+    implementation — mirror every artifact into a temp directory, run
+    ``index_fs`` over it, upload the result back — is what this replaced,
+    and it made the cost of publishing a 25 KB package the size of the
+    entire channel. Under a hard per-pod ephemeral-storage limit that is
+    not a slow leak: the first upload to a channel larger than the limit
+    kills the process mid-request, and since the artifact reaches object
+    storage before repodata does, the package is accepted and then
+    silently never listed.
+
+    What repodata.json needs is each archive's ``info/index.json`` plus
+    its size and hashes — kilobytes per package, none of it in the
+    payload. So:
+
+    * A package already recorded in the database contributes its stored
+      record and is never fetched. That is the overwhelmingly common
+      case, and it makes a steady-state reindex cost zero bytes.
+    * A package the database does not know is spooled to a temp file,
+      read, and deleted before the next one is considered — so the disk
+      high-water mark is one archive, not one channel.
+
+    Size is the change detector: the listing supplies it for free, and
+    bytes replaced under an existing filename are the only way a known
+    record can go stale.
+
+    A storage failure part-way through aborts the whole pass rather than
+    publishing what it managed to collect. The index this writes is a
+    replacement, not a patch, so "carry on without the packages that
+    could not be read" is the same operation as deleting them — and a
+    transient read error is not a statement about a package.
+    """
     prefix = channel.storage_prefix.strip("/")
-    with tempfile.TemporaryDirectory() as tmp:
-        channel_dir = Path(tmp) / prefix.split("/")[-1]
-        (channel_dir / "noarch").mkdir(parents=True, exist_ok=True)
+    known = await _known_entries(session, channel)
+    found: dict[str, dict[str, dict[str, Any]]] = {}
 
-        async for meta in storage.list(f"{prefix}/"):
-            if not meta.key.endswith(PACKAGE_SUFFIXES):
-                continue
-            rel = meta.key[len(prefix) :].lstrip("/")
-            dest = channel_dir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(await storage.get(meta.key))
+    async for meta in storage.list(f"{prefix}/"):
+        if not meta.key.endswith(PACKAGE_SUFFIXES):
+            continue
+        rel = meta.key[len(prefix) :].lstrip("/")
+        parts = rel.split("/")
+        if len(parts) != 2:
+            continue
+        subdir, filename = parts
+        if subdir not in SUBDIRS:
+            continue
 
-        await rattler.index.index_fs(channel_dir)
+        entry = known.get((subdir, filename))
+        if entry is None or entry.get("size") != meta.size:
+            fresh = await _entry_from_archive(storage, meta.key, filename, meta.size)
+            if fresh is None:
+                # Not a package rattler can read, so not a package any
+                # client could have installed. Leaving it out of the
+                # index is the accurate answer, not a lossy one.
+                log.warning("reindex.unreadable_archive", key=meta.key)
+                continue
+            entry = fresh
+        found.setdefault(subdir, {})[filename] = entry
 
-        for artifact in channel_dir.rglob("*"):
-            if not artifact.is_file():
-                continue
-            if artifact.name not in REPODATA_ARTIFACTS and artifact.name != "shards.msgpack.zst":
-                continue
-            rel = artifact.relative_to(channel_dir).as_posix()
-            key = f"{prefix}/{rel}"
-            await storage.put(key, artifact.read_bytes())
+    for subdir in SUBDIRS:
+        entries = found.get(subdir)
+        if entries is None and subdir != "noarch":
+            # Nothing there and nothing that claims to be there. Leave the
+            # subdir absent rather than publishing an empty index for a
+            # platform this channel does not target.
+            continue
+        await write_repodata(storage, prefix, subdir, entries or {})
+
+
+async def _known_entries(
+    session: AsyncSession, channel: Channel
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Repodata records already in the database, keyed by (subdir, filename).
+
+    ``PackageVersion.info`` holds the record as repodata carried it, so a
+    row that has one can be republished without touching object storage.
+    Rows that stored something unusable fall back to their own columns,
+    which carry everything repodata strictly requires.
+    """
+    result = await session.execute(
+        select(PackageVersion, Package.name)
+        .join(Package, PackageVersion.package_id == Package.id)
+        .where(Package.channel_id == channel.id)
+    )
+    entries: dict[tuple[str, str], dict[str, Any]] = {}
+    for row, package_name in result:
+        info = dict(row.info or {})
+        if not all(info.get(k) for k in ("name", "version", "build")):
+            info = {
+                "name": package_name,
+                "version": row.version,
+                "build": row.build,
+                "build_number": row.build_number,
+                "subdir": row.subdir,
+                "depends": list(row.depends or []),
+                "constrains": list(row.constrains or []),
+            }
+            if row.sha256:
+                info["sha256"] = row.sha256
+            if row.md5:
+                info["md5"] = row.md5
+            if row.package_timestamp:
+                info["timestamp"] = int(row.package_timestamp.timestamp() * 1000)
+        if row.size is not None:
+            info["size"] = row.size
+        entries[(row.subdir, row.filename)] = info
+    return entries
+
+
+async def _entry_from_archive(
+    storage: Storage, key: str, filename: str, size: int
+) -> dict[str, Any] | None:
+    """Read one archive's repodata record, holding it on disk only as long as that takes.
+
+    Both hashes and ``info/index.json`` come out of a single pass over a
+    single temp file, which is unlinked before this returns — on the
+    failure paths too. Nothing else in the channel is on disk while it
+    exists, which is the whole point.
+
+    Returns ``None`` for an archive that is not a readable package, and
+    raises ``ArchiveFetchError`` when the bytes could not be read at all.
+    The distinction decides whether the channel gets republished without
+    this package: a file rattler rejects is not one any client could have
+    installed, so leaving it out of the index is correct, whereas a
+    storage error says nothing about the package and must not be allowed
+    to quietly delist it.
+    """
+    suffix = ".conda" if filename.endswith(".conda") else ".tar.bz2"
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    try:
+        sha = hashlib.sha256()
+        md5 = hashlib.md5()
+        written = 0
+        try:
+            with os.fdopen(fd, "wb") as tmp:
+                async for chunk in storage.stream(key):
+                    sha.update(chunk)
+                    md5.update(chunk)
+                    written += len(chunk)
+                    tmp.write(chunk)
+        except Exception as exc:
+            raise ArchiveFetchError(f"could not read {key}: {exc}") from exc
+
+        try:
+            index = rattler.IndexJson.from_package_archive(Path(tmp_path))
+        except Exception as exc:
+            log.debug("reindex.archive_unparseable", key=key, error=str(exc))
+            return None
+        return repodata_entry(
+            index=index,
+            filename=filename,
+            size=written or size,
+            sha256=sha.hexdigest(),
+            md5=md5.hexdigest(),
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+
+
+def repodata_entry(
+    *,
+    index: Any,
+    filename: str,
+    size: int,
+    sha256: str | None,
+    md5: str | None,
+) -> dict[str, Any]:
+    """The repodata.json record for one archive, from its ``info/index.json``.
+
+    Field-for-field what rattler-index writes, so a channel indexed by
+    either route reads back the same. Optional fields are omitted rather
+    than emitted as null — clients tolerate absence, and a null
+    ``timestamp`` is not the same thing as no timestamp.
+    """
+    entry: dict[str, Any] = {
+        "name": _index_name(index),
+        "version": str(index.version),
+        "build": index.build,
+        "build_number": int(index.build_number or 0),
+        "subdir": index.subdir,
+        "size": size,
+        "depends": [str(d) for d in (index.depends or [])],
+        "constrains": [str(c) for c in (index.constrains or [])],
+    }
+    if sha256:
+        entry["sha256"] = sha256
+    if md5:
+        entry["md5"] = md5
+    if index.timestamp is not None:
+        entry["timestamp"] = int(index.timestamp.timestamp() * 1000)
+    for attr in ("license", "license_family", "platform", "arch"):
+        value = getattr(index, attr, None)
+        if value:
+            entry[attr] = str(value)
+    track = getattr(index, "track_features", None)
+    if track:
+        entry["track_features"] = (
+            track if isinstance(track, str) else " ".join(str(f) for f in track)
+        )
+    return entry
+
+
+def _index_name(index: Any) -> str:
+    """The bare name string out of a rattler ``PackageName``.
+
+    ``str()`` on one returns its repr rather than the name; same accessor
+    dance as in ``conda_server.api.channels``.
+    """
+    name = index.name
+    for attr in ("source", "normalized"):
+        value = getattr(name, attr, None)
+        if value:
+            return str(value)
+    return str(name)
+
+
+def build_repodata(subdir: str, entries: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Assemble a repodata.json document from per-filename records.
+
+    The two sections are the format's way of separating archive types:
+    ``.tar.bz2`` under ``packages``, ``.conda`` under ``packages.conda``.
+    Clients that only understand the legacy format read the first and
+    ignore the second.
+    """
+    legacy: dict[str, dict[str, Any]] = {}
+    modern: dict[str, dict[str, Any]] = {}
+    for filename, entry in sorted(entries.items()):
+        target = modern if filename.endswith(".conda") else legacy
+        target[filename] = entry
+    return {
+        "info": {"subdir": subdir},
+        "packages": legacy,
+        "packages.conda": modern,
+        "repodata_version": 2,
+    }
+
+
+async def load_repodata_entries(
+    storage: Storage, prefix: str, subdir: str
+) -> dict[str, dict[str, Any]]:
+    """The published records for one subdir, flattened by filename.
+
+    Both sections collapse into one mapping because filenames already
+    encode the archive type, and every caller wants to look a record up
+    by filename rather than to know which half it came from;
+    ``build_repodata`` splits them apart again on the way out.
+
+    **Only a genuinely absent index reads as an empty channel.** Callers
+    merge into what comes back and write the result, so "empty" is
+    indistinguishable from "delete every package in this subdir". A
+    subdir nobody has published to yet is the one case where that is
+    also the truth; a read that failed, or an index that will not parse,
+    is not, and both raise instead. The repair for those is a reindex,
+    which rebuilds from the artifacts rather than from this file.
+    """
+    key = f"{prefix}/{subdir}/repodata.json"
+    if await storage.head(key) is None:
+        return {}
+
+    raw = await storage.get(key)
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        log.error("repodata.unparseable", prefix=prefix, subdir=subdir)
+        raise ValueError(f"{key} is not readable JSON; reindex the channel") from exc
+
+    entries: dict[str, dict[str, Any]] = {}
+    for section in ("packages", "packages.conda"):
+        for filename, info in (data.get(section) or {}).items():
+            entries[filename] = info
+    return entries
+
+
+async def upsert_version(
+    session: AsyncSession,
+    channel: Channel,
+    subdir: str,
+    filename: str,
+    info: dict[str, Any],
+) -> PackageVersion:
+    """Insert or refresh the row for one archive from its repodata record.
+
+    Shares ``_build_version`` / ``_apply_version`` with the reindex sync
+    so a package landing by upload and the same package rediscovered by a
+    later reindex produce identical rows — otherwise the first reindex
+    after a publish would report spurious updates forever.
+    """
+    pkg = await _get_or_create_package(session, channel, info["name"])
+    result = await session.execute(
+        select(PackageVersion).where(
+            PackageVersion.package_id == pkg.id,
+            PackageVersion.subdir == subdir,
+            PackageVersion.filename == filename,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = _build_version(pkg.id, subdir, filename, info)
+        session.add(row)
+    else:
+        _apply_version(row, subdir, filename, info)
+    await session.flush()
+    return row
+
+
+async def write_repodata(
+    storage: Storage, prefix: str, subdir: str, entries: dict[str, dict[str, Any]]
+) -> None:
+    """Publish repodata.json and its zstd sibling for one subdir.
+
+    Both, because clients ask for the compressed one first and fall back
+    to the plain one — leaving a stale ``.zst`` beside a fresh ``.json``
+    would serve the outdated index to precisely the clients quickest to
+    ask for it.
+    """
+    body = json.dumps(build_repodata(subdir, entries), separators=(",", ":")).encode()
+    base = f"{prefix}/{subdir}/repodata.json"
+    await storage.put(base, body, content_type="application/json")
+    await storage.put(
+        f"{base}.zst",
+        zstandard.ZstdCompressor().compress(body),
+        content_type="application/zstd",
+    )
 
 
 def _build_s3_credentials(settings: StorageSettings) -> rattler.index.S3Credentials | None:
@@ -318,7 +627,7 @@ def _should_recapture_about(row: PackageVersion, info: dict[str, Any]) -> bool:
       moved.
 
     The excluded case is the row the import-from-upstream path just
-    created inline. It already carries metadata read from the /tmp copy
+    created inline. It already carries metadata read from the local copy
     but no sha256, so the first reindex after it lands always looks
     "changed" — re-opening the archive there would fetch the whole
     artifact back out of storage to learn what we already know.

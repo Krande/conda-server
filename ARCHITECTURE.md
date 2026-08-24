@@ -40,14 +40,49 @@ A modern, general-purpose conda server built on the [rattler](https://github.com
 2. Issue presigned URL (S3/Azure) with short TTL, return 302.
 3. Record a download metric (async, non-blocking).
 
+### `POST /api/channels/{channel}/packages` (upload)
+
+1. Spool each archive to a temp file (one at a time), reading its size,
+   sha256 and md5 as the bytes go past.
+2. `py-rattler` reads `info/index.json` from the spooled file; the declared
+   subdir decides where the artifact is stored. `info/about.json` is read from
+   the same file, while it is still local and therefore free.
+3. Stream the archive into object storage.
+4. Merge the new record into the subdir's `repodata.json` (+ `.zst`) and upsert
+   the `PackageVersion` row.
+5. **Only then** respond.
+
+Step 5 is the point. Updating the index from a task scheduled to run *after* the
+response makes a 2xx a prediction rather than a fact: the artifact is in object
+storage and the index is not, so a crash in between leaves a package that was
+accepted, is paid for, and cannot be installed — and nothing in the response
+distinguishes that from a publish that worked. Cost is the size of the affected
+subdir's index, not of the channel, which is what makes it affordable to do
+before answering.
+
 ### Reindex
 
 1. `CronJob` (or admin action) calls `conda-server reindex <channel>`.
 2. CLI lists the channel prefix in object storage via `obstore`.
-3. For each new `.conda` / `.tar.bz2` file, `py-rattler` extracts `info/index.json` + related metadata.
+3. `repodata.json` + `repodata.json.zst` are regenerated. How depends on the
+   backend, and the difference is only where the archives already are:
+   - **local** — `rattler-index`'s `index_fs` over the path; the files are
+     already on disk, so nothing is copied.
+   - **s3** — `index_s3`, which works against the bucket in place.
+   - **everything else** — no in-place indexer exists, so the index is built
+     from archive metadata directly (`_reindex_via_metadata`).
 4. Metadata upserted into `PackageVersion` rows.
-5. `rattler-index` regenerates `repodata.json` + `repodata.json.zst` + `current_repodata.json`, uploaded back to storage.
-6. `Channel.repodata_updated_at` bumped to invalidate caches.
+5. `Channel.repodata_updated_at` bumped to invalidate caches.
+
+**Reindexing must not scale in disk with the size of the channel.** The
+tempting implementation of the generic route — mirror every artifact into a
+temp directory and point `index_fs` at it — holds the whole channel on
+ephemeral disk, which is a fixed per-pod quota shared with everything else in
+the container and one the process cannot grow. So the generic route reads
+metadata instead: a package already in the database contributes its stored
+record and is never fetched at all (a steady-state reindex moves zero bytes),
+and one the database does not know is spooled, read, and deleted before the
+next is considered. The disk high-water mark is one archive.
 
 #### Package metadata (`info/about.json`)
 
@@ -64,8 +99,8 @@ metadata captured for an older version is metadata nothing asks for. "Newest" is
 recomputed from the package's whole version list on every pass, so a rebuild of
 an older version landing after a newer one shipped is not mistaken for the
 newest, and a version that becomes the newest is captured then. The
-import-from-upstream path reads its own metadata from the copy already spooled
-to `/tmp`, so it costs no extra fetch at all.
+import-from-upstream path reads its own metadata from the copy it already
+spooled locally, so it costs no extra fetch at all. So does the upload path.
 
 Reading one archive costs a fraction of the archive, not the archive. A
 `.conda` is a zip and a zip keeps its index at the tail, so `head` plus two
