@@ -2,6 +2,74 @@
 
 
 
+## v0.8.3 (2026-08-24)
+
+### Chore
+
+* chore: cover the legacy .tar.bz2 capture path end to end (#20)
+
+The ranged path serves .conda only, so .tar.bz2 is the format a change
+like that quietly breaks. Assert through capture_about that a legacy
+archive still yields its metadata and still takes the streaming route. ([`50e0717`](https://github.com/Krande/conda-server/commit/50e07174263b1c00209b45d8c2fb1998f19af830))
+
+### Fix
+
+* fix: stop reindex from staging the whole channel on local disk (#21)
+
+Publishing a package rebuilt the channel index by mirroring every
+artifact in the channel into a temp directory, running rattler&#39;s
+index_fs over it, and uploading the result back. That made the
+local-disk cost of an upload the size of the entire channel rather than
+the size of the upload — a factor of tens of thousands for a small
+package — and it ran on every successful upload.
+
+On a deployment with a fixed per-pod ephemeral-storage quota that is not
+a slow leak. Once a channel outgrows the quota, every publish fills it
+partway through the rebuild and the process is killed. The artifact is
+already in object storage by then and the index is not, so the package
+is accepted, paid for, and never listed. Worse, the client has already
+been told it worked: the reply was sent before the index update, which
+was scheduled as a background task. Nothing distinguishes that from a
+publish that succeeded.
+
+Two changes, and both are needed — either alone still loses packages.
+
+Reindex no longer stages archives. What repodata.json needs from an
+archive is its info/index.json plus size and hashes, which is kilobytes
+per package and none of the payload. A package already recorded in the
+database contributes its stored record and is not fetched at all, so a
+steady-state reindex now moves zero bytes; one the database does not
+know is spooled, read, and deleted before the next is considered, so the
+disk high-water mark is one archive rather than one channel. A storage
+failure aborts the pass instead of publishing what it collected — the
+index is written as a replacement, so continuing past an unreadable
+archive would delist it.
+
+Upload publishes before it answers. The record is merged into the
+subdir&#39;s repodata.json and the database row upserted while the request
+is still open, so a 2xx means the package is listed rather than
+predicting that it will be. This costs the size of the affected subdir&#39;s
+index, not the channel, which is what makes it affordable to do inline.
+about.json is read from the spooled file at the same time, while the
+bytes are still local, sparing the backfill sweep a later fetch.
+
+Also stops hardcoding /tmp. The upload spool, the import spool and the
+solver&#39;s upstream-repodata cache now sit under the platform temp
+directory, so TMPDIR points them at a volume the operator sized. That
+matters most for the solver cache, which is never pruned and holds
+parsed repodata for every upstream subdir a preview has touched.
+
+Tests measure the bound directly rather than asserting an
+implementation: a watched temp directory shows peak disk during a
+reindex of a six-archive channel staying within one archive, with a
+lower-bound assertion so the test cannot pass by measuring nothing.
+
+
+Claude-Session: https://claude.ai/code/session_01Mdyz12Wh4LQgzdAN1DYneo
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`c88cfb4`](https://github.com/Krande/conda-server/commit/c88cfb4d7a51cabd0577c29d2ef5003a82a9639e))
+
+
 ## v0.8.2 (2026-08-23)
 
 ### Fix
