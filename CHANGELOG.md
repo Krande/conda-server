@@ -2,6 +2,51 @@
 
 
 
+## v0.8.4 (2026-08-28)
+
+### Chore
+
+* chore(ci): bump deputy to v0.5.2 and drop the inline gitpython pin (#23)
+
+deputy v0.5.2 carries &#34;gitpython&lt;3.1.60&#34; in both its [project].dependencies
+and its pixi run-dependencies, so the workaround this repo installed alongside
+deputy is now redundant. A one-line note stays behind so nobody re-adds it.
+
+The jump from v0.4.0 spans two feature releases, neither of which changes
+pr-review or tag-on-merge behaviour for a repo that does not opt in:
+
+  v0.5.0 adds [release].version_json, an opt-in JSON-aware version bump for
+         npm manifests. run_release takes an empty list by default and behaves
+         exactly as before.
+  v0.5.1 makes gitops-update match a manifest&#39;s existing list indentation
+         instead of reformatting it. Only affects the gitops-update command.
+  v0.5.2 adds the gitpython pin.
+
+
+Claude-Session: https://claude.ai/code/session_01Mdyz12Wh4LQgzdAN1DYneo
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`8e62cfc`](https://github.com/Krande/conda-server/commit/8e62cfc008f4b90ccc43c499fafc402f61ea8edd))
+
+### Fix
+
+* fix: keep published hashes describing the bytes actually in storage (#24)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`2fd0da0`](https://github.com/Krande/conda-server/commit/2fd0da0a3a13e53043486dd2bb442ce1950ff9a7))
+
+* fix: pin gitpython&lt;3.1.60 in the deputy install steps (#22)
+
+GitPython 3.1.60 (uploaded to PyPI 2026-08-25T18:33:44Z) removed
+git.Actor.name_email_regex. python-semantic-release reads that attribute
+unconditionally at config load, so every semantic-release subcommand now
+raises AttributeError and no release can be cut.
+
+deputy v0.4.0 pins python-semantic-release but leaves gitpython
+unconstrained, so any fresh install picks up 3.1.60. Appending the
+constraint to the same pip install keeps the resolution on 3.1.59.
+
+Temporary: drop once PSR guards the attribute or deputy pins it upstream. ([`d9f21cc`](https://github.com/Krande/conda-server/commit/d9f21ccb11d3c3eeaab68201aa44dec550a6cce7))
+
+
 ## v0.8.3 (2026-08-24)
 
 ### Chore
