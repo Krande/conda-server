@@ -96,16 +96,27 @@ class IndexResult:
     added: int
     updated: int
     removed: int
+    #: Rows whose published hash did not describe the bytes in storage
+    #: and were rewritten from the archive. See ``_repair_drifted_records``.
+    repaired: int = 0
 
 
 async def reindex_channel(
     session: AsyncSession,
     storage: Storage,
     channel: Channel,
+    *,
+    verify: bool = False,
 ) -> IndexResult:
-    """Run rattler-index over the channel's storage prefix and sync the DB."""
+    """Run rattler-index over the channel's storage prefix and sync the DB.
+
+    ``verify`` re-hashes every archive in the channel instead of only the
+    ones a cheap check already suspects. It is off by default because the
+    cost is the whole channel's egress; see ``_repair_drifted_records``
+    for what the default pass catches without it.
+    """
     settings = get_settings().storage
-    log.info("reindex.start", channel=channel.name, backend=settings.backend)
+    log.info("reindex.start", channel=channel.name, backend=settings.backend, verify=verify)
 
     if settings.backend == "local":
         await _reindex_local(settings, channel)
@@ -115,10 +126,115 @@ async def reindex_channel(
         await _reindex_via_metadata(session, storage, channel)
 
     stats = await _sync_db_from_repodata(session, storage, channel)
+    stats["repaired"] = await _repair_drifted_records(session, storage, channel, verify=verify)
     channel.repodata_updated_at = datetime.now(UTC)
 
     log.info("reindex.done", channel=channel.name, **stats)
     return IndexResult(channel=channel.name, **stats)
+
+
+async def _repair_drifted_records(
+    session: AsyncSession,
+    storage: Storage,
+    channel: Channel,
+    *,
+    verify: bool,
+) -> int:
+    """Rewrite records whose hash no longer describes the bytes in storage.
+
+    Reconciling *which* files exist is what the rest of a reindex does,
+    and it is blind to the case where the filename never moved but the
+    bytes underneath it did. A CI job that rebuilds a package under a
+    stable version+build-string produces exactly that: the archive is
+    replaced, the published sha256 is not, and every client that trusts
+    the index fails to extract what it downloaded. Nothing upstream of
+    here notices — rattler-index leaves a filename already present in
+    repodata alone, so the stale record survives every subsequent pass
+    and the run reports no changes at all.
+
+    Cost is what decides how much of the channel this is allowed to
+    read:
+
+    * The listing already carries every object's size, so one pass over
+      it is free and catches any rebuild whose output changed length —
+      which is the overwhelmingly common shape of the bug, and the one
+      that broke the channel this was written for.
+    * A row that has no sha256 at all (the import path creates one
+      before the hash is known) is read once and then never again.
+    * ``verify`` drops the size gate and re-hashes everything. That is
+      the only way to catch a byte-for-byte-length rebuild, and it costs
+      the channel's egress, so it stays an explicit operator decision
+      rather than the price of a routine reindex.
+
+    Object storage is written before the database, for the same reason
+    the upload path does: repodata is what clients read.
+    """
+    prefix = channel.storage_prefix.strip("/")
+    result = await session.execute(
+        select(PackageVersion)
+        .join(Package, PackageVersion.package_id == Package.id)
+        .where(Package.channel_id == channel.id)
+    )
+    rows = {(v.subdir, v.filename): v for v in result.scalars()}
+    if not rows:
+        return 0
+
+    sizes: dict[tuple[str, str], int] = {}
+    async for meta in storage.list(f"{prefix}/"):
+        if not meta.key.endswith(PACKAGE_SUFFIXES):
+            continue
+        parts = meta.key[len(prefix) :].lstrip("/").split("/")
+        if len(parts) != 2:
+            continue
+        sizes[(parts[0], parts[1])] = meta.size
+
+    fixed: dict[str, dict[str, dict[str, Any]]] = {}
+    for (subdir, filename), row in rows.items():
+        stored_size = sizes.get((subdir, filename))
+        if stored_size is None:
+            # A row with no object behind it is a listing question, not a
+            # hash one, and _sync_db_from_repodata already owns it.
+            continue
+        if not verify and row.sha256 and row.size == stored_size:
+            continue
+
+        key = f"{prefix}/{subdir}/{filename}"
+        fresh = await _entry_from_archive(storage, key, filename, stored_size)
+        if fresh is None:
+            # Unreadable bytes say nothing about the record, and dropping
+            # the package over it would be a bigger claim than we have.
+            log.warning("reindex.unreadable_archive", key=key)
+            continue
+        if fresh.get("sha256") == row.sha256 and fresh.get("size") == row.size:
+            continue
+
+        log.warning(
+            "reindex.record_drifted",
+            channel=channel.name,
+            subdir=subdir,
+            filename=filename,
+            published_sha256=row.sha256,
+            actual_sha256=fresh.get("sha256"),
+            published_size=row.size,
+            actual_size=fresh.get("size"),
+        )
+        fixed.setdefault(subdir, {})[filename] = fresh
+
+    if not fixed:
+        return 0
+
+    for subdir, records in fixed.items():
+        entries = await load_repodata_entries(storage, prefix, subdir)
+        entries.update(records)
+        await write_repodata(storage, prefix, subdir, entries)
+        await invalidate_sharded_index(storage, prefix, subdir)
+
+    for subdir, records in fixed.items():
+        for filename, info in records.items():
+            _apply_version(rows[(subdir, filename)], subdir, filename, info)
+    await session.flush()
+
+    return sum(len(records) for records in fixed.values())
 
 
 async def _reindex_local(settings: StorageSettings, channel: Channel) -> None:
@@ -469,6 +585,29 @@ async def write_repodata(
         zstandard.ZstdCompressor().compress(body),
         content_type="application/zstd",
     )
+
+
+async def invalidate_sharded_index(storage: Storage, prefix: str, subdir: str) -> None:
+    """Drop the CEP-16 shard index once repodata.json has moved past it.
+
+    rattler-index publishes ``repodata_shards.msgpack.zst`` beside
+    repodata.json, and pixi/rattler ask for it *first*. Nothing outside
+    rattler-index can update it, so a subdir whose records were just
+    rewritten keeps handing the superseded hashes to precisely the
+    clients quickest to ask — the same failure ``write_repodata`` writes
+    both the plain and the zstd index to avoid, one file further along.
+
+    Removing it is a downgrade, not a loss: a client that misses the
+    shard index falls back to repodata.json, which is exact, and the next
+    rattler-backed reindex republishes it. The per-name shards it pointed
+    at are content-addressed and unreachable without it, so they are left
+    where they are rather than deleted one by one.
+    """
+    key = f"{prefix}/{subdir}/repodata_shards.msgpack.zst"
+    if await storage.head(key) is None:
+        return
+    with contextlib.suppress(FileNotFoundError):
+        await storage.delete(key)
 
 
 def _build_s3_credentials(settings: StorageSettings) -> rattler.index.S3Credentials | None:

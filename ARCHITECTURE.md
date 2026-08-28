@@ -72,7 +72,9 @@ before answering.
    - **everything else** — no in-place indexer exists, so the index is built
      from archive metadata directly (`_reindex_via_metadata`).
 4. Metadata upserted into `PackageVersion` rows.
-5. `Channel.repodata_updated_at` bumped to invalidate caches.
+5. Records whose stored object no longer matches them are re-hashed and
+   rewritten (`_repair_drifted_records`).
+6. `Channel.repodata_updated_at` bumped to invalidate caches.
 
 **Reindexing must not scale in disk with the size of the channel.** The
 tempting implementation of the generic route — mirror every artifact into a
@@ -83,6 +85,27 @@ metadata instead: a package already in the database contributes its stored
 record and is never fetched at all (a steady-state reindex moves zero bytes),
 and one the database does not know is spooled, read, and deleted before the
 next is considered. The disk high-water mark is one archive.
+
+#### Records that stopped describing their bytes
+
+Steps 1–4 reconcile *which* files exist. They are blind to the case where the
+filename never moved but the archive under it did — a CI job that rebuilds a
+package under a stable version+build-string, where the build is not
+byte-reproducible. `rattler-index` leaves a filename already present in
+repodata alone, so the superseded hash survives every subsequent pass and the
+run reports no changes at all, while clients fail to extract what they
+downloaded.
+
+Step 5 closes that. The storage listing already carries every object's size,
+so one free pass catches any rebuild whose output changed length, and only the
+suspects are re-read. Bytes replaced without the length changing need
+`reindex --verify`, which drops the size gate and re-hashes the channel — the
+cost is the channel's egress, which is why it is an explicit operator decision
+rather than the price of a routine reindex.
+
+The upload path publishes the record for the bytes it just stored, replacing
+any record for the same filename, so it does not create this state; a crash
+between the object write and the index write does, and this is the way back.
 
 #### Package metadata (`info/about.json`)
 
