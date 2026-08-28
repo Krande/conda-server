@@ -48,6 +48,7 @@ from conda_server.config import get_settings
 from conda_server.db import SessionDep, get_sessionmaker
 from conda_server.indexer import (
     apply_about,
+    invalidate_sharded_index,
     load_repodata_entries,
     reindex_channel,
     repodata_entry,
@@ -304,11 +305,25 @@ async def trigger_reindex(
     session: SessionDep,
     user: Annotated[User, Depends(current_user)],
     channel: Annotated[Channel, Depends(require_channel_writer)],
+    verify: bool = False,
 ) -> dict[str, str]:
+    """Reconcile the channel's index with what is actually in storage.
+
+    ``verify=true`` additionally re-hashes every archive rather than only
+    those a routine pass already suspects. It reads the whole channel, so
+    it is the deliberate repair for an index known to be wrong, not
+    something to schedule.
+    """
     _ = name
-    await audit.record(session, user, "channel.reindex", channel_name=channel.name)
+    await audit.record(
+        session,
+        user,
+        "channel.reindex",
+        channel_name=channel.name,
+        meta={"verify": verify},
+    )
     await session.commit()
-    background.add_task(_reindex_background, channel.name)
+    background.add_task(_reindex_background, channel.name, verify)
     return {"status": "accepted", "channel": channel.name}
 
 
@@ -593,7 +608,11 @@ async def upload_packages(
                 "package.upload",
                 channel_name=channel.name,
                 target=r["filename"],
-                meta={"subdir": r.get("subdir"), "size": r.get("size")},
+                meta={
+                    "subdir": r.get("subdir"),
+                    "size": r.get("size"),
+                    "replaced": r.get("replaced"),
+                },
             )
     await session.commit()
 
@@ -602,6 +621,7 @@ async def upload_packages(
         channel=channel.name,
         count=len(results),
         stored=sum(1 for r in results if r.get("status") == "stored"),
+        replaced=sum(1 for r in results if r.get("replaced")),
         user=user.email,
     )
     return {"channel": channel.name, "results": results}
@@ -707,6 +727,14 @@ async def _store_one_package(
                         break
                     yield c
 
+        # Whether this key is already taken decides nothing about
+        # acceptance — a re-upload replaces — but it is worth reporting.
+        # CI that rebuilds a package under a stable version+build-string
+        # replaces the artifact on every run, and the operator reading
+        # the response should be able to tell that apart from a first
+        # publish without diffing the channel.
+        previous = await storage.head(key)
+
         content_type = "application/x-conda" if filename.endswith(".conda") else "application/x-tar"
         written = await storage.put_stream(
             key,
@@ -714,6 +742,13 @@ async def _store_one_package(
             content_type=content_type,
             content_disposition=f'attachment; filename="{filename}"',
         )
+        if written != spooled:
+            # The record about to be published carries the hash of the
+            # bytes we spooled; a different length in storage means it
+            # describes an object that isn't there. Refuse rather than
+            # index it — an unlisted archive is recoverable, an index
+            # entry no client can verify is what breaks every install.
+            raise ValueError(f"storage accepted {written} of {spooled} bytes")
 
         UPLOADS_TOTAL.labels(channel=channel.name, subdir=subdir).inc()
         UPLOAD_BYTES.labels(channel=channel.name).inc(written)
@@ -726,6 +761,7 @@ async def _store_one_package(
                 "name": _package_name_str(index.name),
                 "version": str(index.version),
                 "build": index.build,
+                "replaced": previous is not None,
             }
         )
         return _StoredPackage(
@@ -792,6 +828,14 @@ async def _publish_uploads(
     installable but missing from the server's own listing, which the next
     reindex repairs; the reverse order would leave the row claiming a
     package that no client can find.
+
+    **A filename that already exists is replaced, record and row
+    together.** The record is keyed by filename and is rewritten
+    wholesale, so the index describes the bytes this upload just stored
+    rather than the ones it displaced — an archive rebuilt under the same
+    version+build-string has a genuinely different hash, and any handling
+    that keeps the old record while taking the new bytes publishes a
+    hash no client can reproduce.
     """
     prefix = channel.storage_prefix.strip("/")
     by_subdir: dict[str, list[_StoredPackage]] = {}
@@ -804,6 +848,11 @@ async def _publish_uploads(
             for item in items:
                 entries[item.filename] = item.record
             await write_repodata(storage, prefix, subdir, entries)
+            # repodata.json is not the only index in the subdir. The
+            # sharded one a reindex leaves behind still advertises what
+            # this upload just replaced, and it is the one pixi reads
+            # first.
+            await invalidate_sharded_index(storage, prefix, subdir)
 
     for item in stored:
         row = await upsert_version(session, channel, item.subdir, item.filename, item.record)
@@ -1917,7 +1966,7 @@ async def _run_about_backfill(*, job_id: int, channel_id: int, channel_name: str
                 await session.commit()
 
 
-async def _reindex_background(channel_name: str) -> None:
+async def _reindex_background(channel_name: str, verify: bool = False) -> None:
     """Run a reindex in its own session so the request's session isn't held open."""
     sm = get_sessionmaker()
     with REINDEX_DURATION.labels(channel=channel_name).time():
@@ -1929,7 +1978,7 @@ async def _reindex_background(channel_name: str) -> None:
                     log.warning("reindex.channel_missing", channel=channel_name)
                     REINDEX_RUNS.labels(channel=channel_name, result="missing").inc()
                     return
-                outcome = await reindex_channel(session, get_storage(), channel)
+                outcome = await reindex_channel(session, get_storage(), channel, verify=verify)
                 await session.commit()
                 REINDEX_RUNS.labels(channel=channel_name, result="success").inc()
                 log.info(
@@ -1938,6 +1987,7 @@ async def _reindex_background(channel_name: str) -> None:
                     added=outcome.added,
                     updated=outcome.updated,
                     removed=outcome.removed,
+                    repaired=outcome.repaired,
                 )
         except Exception as exc:
             REINDEX_RUNS.labels(channel=channel_name, result="failure").inc()

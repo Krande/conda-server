@@ -50,12 +50,31 @@ def serve(
 @app.command()
 def reindex(
     channel_name: str = typer.Argument(..., help="Channel name to reindex"),
+    verify: bool = typer.Option(
+        False,
+        "--verify",
+        help="Re-hash every archive, not only the ones whose stored size moved.",
+    ),
 ) -> None:
-    """Reindex a channel from object storage."""
-    asyncio.run(_reindex(channel_name))
+    """Reindex a channel from object storage.
+
+    A plain run reconciles which files exist and repairs any record whose
+    stored object changed size — the shape a rebuilt package almost
+    always takes, and free to detect because the listing supplies sizes.
+
+    ``--verify`` re-hashes every archive instead. That is the only way to
+    catch bytes that were replaced without the length changing, and it
+    reads the entire channel, so run it when an index is known to be
+    wrong rather than on a schedule.
+
+    The counts are ``+added ~updated -removed !repaired``; a non-zero
+    ``!`` means the published hash did not describe the stored bytes and
+    now does.
+    """
+    asyncio.run(_reindex(channel_name, verify))
 
 
-async def _reindex(channel_name: str) -> None:
+async def _reindex(channel_name: str, verify: bool = False) -> None:
     settings = get_settings()
     configure_logging(settings.logging)
     storage = get_storage()
@@ -67,11 +86,11 @@ async def _reindex(channel_name: str) -> None:
             if channel is None:
                 rprint(f"[red]channel not found:[/red] {channel_name}")
                 raise typer.Exit(code=1)
-            outcome = await reindex_channel(session, storage, channel)
+            outcome = await reindex_channel(session, storage, channel, verify=verify)
             await session.commit()
         rprint(
             f"[green]reindexed[/green] {outcome.channel}: "
-            f"+{outcome.added} ~{outcome.updated} -{outcome.removed}"
+            f"+{outcome.added} ~{outcome.updated} -{outcome.removed} !{outcome.repaired}"
         )
     finally:
         await dispose_engine()

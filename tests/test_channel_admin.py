@@ -100,7 +100,8 @@ async def test_reindex_queues_background_task(app, client):
     # BackgroundTasks invokes after the response; assert it was scheduled by
     # inspecting the mock's call count (FastAPI runs it via asyncio.run in tests).
     assert mocked.call_count == 1
-    assert mocked.call_args.args == ("c1",)
+    # The verify flag rides along; a plain trigger is the cheap pass.
+    assert mocked.call_args.args == ("c1", False)
 
 
 @pytest.mark.asyncio
@@ -718,3 +719,128 @@ async def test_upload_rejects_unknown_subdir_from_archive(app, client):
     result = resp.json()["results"][0]
     assert result["status"] == "error"
     assert "subdir" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_reupload_republishes_the_record_for_the_new_bytes(app, client, tmp_path):
+    """Same filename, different archive — the index must follow the bytes.
+
+    CI that rebuilds a package under a stable version+build-string is a
+    supported workflow here, and the build is not byte-reproducible, so
+    the second upload is a genuinely different artifact under an
+    unchanged name. Rejecting it would break the publisher; taking the
+    bytes while keeping the old record breaks every installer, because
+    repodata then advertises a hash the download cannot reproduce. The
+    row, the published record and the object all have to agree.
+    """
+    import hashlib
+
+    from sqlalchemy import select
+
+    from conda_server import storage as storage_module
+    from conda_server.models import PackageVersion
+    from conda_server.storage import LocalStore, ObstoreStorage
+
+    admin = await _seed_admin()
+    await _seed_channel("rebuild")
+    cookie = make_session_cookie(admin.subject)
+
+    store = ObstoreStorage(LocalStore(str(tmp_path)), supports_signing=False)
+    storage_module.set_storage(store)
+    try:
+        filename = "demopkg-1.2.0-h1234567_1.conda"
+        first = b"BUILD_ONE" * 512
+        # Not a truncation or a resend: a different artifact, of a
+        # different length, under the same name.
+        second = b"BUILD_TWO" * 512 + b"_RERUN"
+
+        for body in (first, second):
+            with (
+                patch(
+                    "conda_server.api.channels.rattler.IndexJson.from_package_archive",
+                    return_value=_stub_index(
+                        subdir="linux-64", name="demopkg", version="1.2.0", build="h1234567_1"
+                    ),
+                ),
+                patch("conda_server.api.channels._reindex_background"),
+            ):
+                resp = await client.post(
+                    "/api/channels/rebuild/packages",
+                    files=[("files", (filename, body, "application/octet-stream"))],
+                    cookies={"session": cookie},
+                )
+            assert resp.status_code == 202
+            assert resp.json()["results"][0]["status"] == "stored"
+
+        # The re-upload is reported as a replacement rather than passed
+        # off as a first publish.
+        assert resp.json()["results"][0]["replaced"] is True
+
+        stored = await store.get(f"rebuild/linux-64/{filename}")
+        assert stored == second
+        actual_sha = hashlib.sha256(second).hexdigest()
+
+        published = await _published(store, "rebuild", "linux-64")
+        assert published[filename]["sha256"] == actual_sha
+        assert published[filename]["size"] == len(second)
+
+        sm = get_sessionmaker()
+        async with sm() as session:
+            row = (
+                await session.execute(
+                    select(PackageVersion).where(PackageVersion.filename == filename)
+                )
+            ).scalar_one()
+            assert row.sha256 == actual_sha
+            assert row.size == len(second)
+    finally:
+        storage_module.reset_storage()
+
+
+@pytest.mark.asyncio
+async def test_upload_drops_the_shard_index_it_cannot_update(app, client, tmp_path):
+    """The sharded index is the one pixi reads first.
+
+    A reindex leaves ``repodata_shards.msgpack.zst`` behind and nothing
+    on the upload path can rewrite it, so publishing over a filename it
+    covers has to retire it — otherwise the corrected repodata.json is
+    served only to the clients that ask for the slower index.
+    """
+    from conda_server import storage as storage_module
+    from conda_server.storage import LocalStore, ObstoreStorage
+
+    admin = await _seed_admin()
+    await _seed_channel("sharded")
+    cookie = make_session_cookie(admin.subject)
+
+    store = ObstoreStorage(LocalStore(str(tmp_path)), supports_signing=False)
+    storage_module.set_storage(store)
+    try:
+        await store.put("sharded/linux-64/repodata_shards.msgpack.zst", b"stale-shard-index")
+        with (
+            patch(
+                "conda_server.api.channels.rattler.IndexJson.from_package_archive",
+                return_value=_stub_index(
+                    subdir="linux-64", name="xtensor", version="0.25.0", build="hf036a51_0"
+                ),
+            ),
+            patch("conda_server.api.channels._reindex_background"),
+        ):
+            resp = await client.post(
+                "/api/channels/sharded/packages",
+                files=[
+                    (
+                        "files",
+                        (
+                            "xtensor-0.25.0-hf036a51_0.conda",
+                            b"BYTES" * 64,
+                            "application/octet-stream",
+                        ),
+                    )
+                ],
+                cookies={"session": cookie},
+            )
+        assert resp.status_code == 202
+        assert await store.head("sharded/linux-64/repodata_shards.msgpack.zst") is None
+    finally:
+        storage_module.reset_storage()
