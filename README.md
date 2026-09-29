@@ -96,6 +96,32 @@ Any OIDC-compliant provider works (Authentik, Keycloak, Authelia, Azure AD, Goog
 
 When TLS is terminated upstream (k8s ingress, nginx, Traefik), uvicorn must be started with `--proxy-headers --forwarded-allow-ips='*'` so that `request.url_for()` returns `https://…` — otherwise the OIDC `redirect_uri` won't match what's registered with the IdP. The shipped Dockerfile does this.
 
+## Publishing with rattler-build
+
+The server accepts uploads over the prefix.dev protocol at
+`/api/v1/upload/<channel>`, so rattler-build can publish to it with the
+`prefix://` scheme. Mint an API token under **API tokens** in the web UI
+(you need writer access on the channel), then:
+
+```bash
+rattler-build auth login conda.example.com --token <token>
+rattler-build build --recipe recipe.yaml --output-dir output
+rattler-build publish output/*/*.conda --to prefix://conda.example.com/<channel>
+```
+
+In CI, skip the login and pass the server and token as env vars:
+
+```bash
+PREFIX_SERVER_URL=https://conda.example.com PREFIX_API_KEY=<token> \
+  rattler-build upload prefix --channel <channel> output/*/*.conda
+```
+
+Publish built archives rather than a recipe. `publish recipe.yaml` also
+adds the `--to` URL to its dependency channels, and the solver can't read
+`prefix://`. An existing package is refused with 409 unless you pass
+`--force` (or `--skip-existing` to `upload prefix`). The native
+`POST /api/channels/<channel>/packages` endpoint replaces instead.
+
 ## Deployment
 
 Published images are pushed to the GitHub Container Registry on each
