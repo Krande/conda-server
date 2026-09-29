@@ -600,6 +600,27 @@ async def upload_packages(
     if stored:
         await _publish_uploads(session, storage, channel, stored)
 
+    await record_uploads(session, user, channel, results)
+    await session.commit()
+
+    log.info(
+        "upload.batch",
+        channel=channel.name,
+        count=len(results),
+        stored=sum(1 for r in results if r.get("status") == "stored"),
+        replaced=sum(1 for r in results if r.get("replaced")),
+        user=user.email,
+    )
+    return {"channel": channel.name, "results": results}
+
+
+async def record_uploads(
+    session: AsyncSession,
+    user: User,
+    channel: Channel,
+    results: list[dict[str, Any]],
+) -> None:
+    """Add an audit row for every result that reached storage. Caller commits."""
     for r in results:
         if r.get("status") == "stored":
             await audit.record(
@@ -614,17 +635,10 @@ async def upload_packages(
                     "replaced": r.get("replaced"),
                 },
             )
-    await session.commit()
 
-    log.info(
-        "upload.batch",
-        channel=channel.name,
-        count=len(results),
-        stored=sum(1 for r in results if r.get("status") == "stored"),
-        replaced=sum(1 for r in results if r.get("replaced")),
-        user=user.email,
-    )
-    return {"channel": channel.name, "results": results}
+
+class PackageExists(Exception):
+    """An upload that may not replace would have overwritten an archive."""
 
 
 @dataclass(frozen=True)
@@ -654,6 +668,8 @@ async def _store_one_package(
     *,
     max_file_bytes: int,
     max_total_bytes: int,
+    replace: bool = True,
+    expected_sha256: str | None = None,
 ) -> _StoredPackage:
     """Spool upload → temp file → read metadata via rattler → stream into storage.
 
@@ -669,6 +685,11 @@ async def _store_one_package(
     Enforces two caps: ``max_file_bytes`` for this single file, and
     ``max_total_bytes`` as the remaining budget within the batch. Whichever
     fires first aborts the spool before the tmpfile grows further.
+
+    ``replace=False`` raises :class:`PackageExists` instead of overwriting
+    an archive already at the key, and ``expected_sha256`` rejects bytes
+    that don't match the client's declared digest. Both are checked before
+    anything is written to storage.
     """
     if "/" in filename or ".." in filename or not filename:
         raise ValueError("invalid filename")
@@ -706,6 +727,9 @@ async def _store_one_package(
                 md5.update(chunk)
                 tmp.write(chunk)
 
+        if expected_sha256 is not None and sha.hexdigest() != expected_sha256.strip().lower():
+            raise ValueError("sha256 of received bytes does not match the declared digest")
+
         try:
             index = rattler.IndexJson.from_package_archive(tmp_path)
         except Exception as exc:
@@ -734,6 +758,8 @@ async def _store_one_package(
         # the response should be able to tell that apart from a first
         # publish without diffing the channel.
         previous = await storage.head(key)
+        if previous is not None and not replace:
+            raise PackageExists(f"{subdir}/{filename} already exists in {channel.name}")
 
         content_type = "application/x-conda" if filename.endswith(".conda") else "application/x-tar"
         written = await storage.put_stream(

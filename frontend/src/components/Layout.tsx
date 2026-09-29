@@ -3,7 +3,6 @@ import { Link, NavLink, Outlet } from "react-router-dom";
 import { UserMenu } from "./UserMenu";
 import { MobileMenu } from "./MobileMenu";
 import { ThemeToggle } from "./ThemeToggle";
-import { SettingsMenu } from "./SettingsMenu";
 import { BrandMark } from "./BrandMark";
 import { cn } from "@/lib/cn";
 
@@ -49,7 +48,6 @@ export default function Layout() {
 
           <div className="ml-auto flex items-center gap-1">
             <ThemeToggle className="hidden sm:inline-flex" />
-            <SettingsMenu className="hidden sm:inline-flex" />
             <div className="ml-1 hidden sm:block">
               <UserMenu />
             </div>

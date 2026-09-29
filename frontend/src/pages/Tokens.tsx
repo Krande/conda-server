@@ -5,6 +5,7 @@ import { CopyButton } from "@/components/ui/CopyButton";
 import { EmptyState, ErrorState } from "@/components/ui/EmptyState";
 import { Input } from "@/components/ui/Input";
 import { PageSpinner } from "@/components/ui/Spinner";
+import { RattlerBuildPublishTip } from "@/components/RattlerBuildPublishTip";
 import { useCurrentUser, loginRedirectUrl } from "@/lib/auth";
 import {
   useCreateToken,
@@ -13,6 +14,9 @@ import {
 } from "@/lib/queries";
 import type { ApiTokenCreated } from "@/lib/types";
 
+// Pre-filled so tokens expire unless the user deliberately clears the field.
+const DEFAULT_EXPIRES_DAYS = "180";
+
 export default function Tokens() {
   const { isLoggedIn, isLoading: authLoading } = useCurrentUser();
   const tokensQ = useTokens();
@@ -20,7 +24,7 @@ export default function Tokens() {
   const revoke = useRevokeToken();
 
   const [description, setDescription] = useState("");
-  const [expiresDays, setExpiresDays] = useState<string>("");
+  const [expiresDays, setExpiresDays] = useState<string>(DEFAULT_EXPIRES_DAYS);
   const [justCreated, setJustCreated] = useState<ApiTokenCreated | null>(null);
 
   if (authLoading) return <PageSpinner />;
@@ -49,7 +53,7 @@ export default function Tokens() {
     });
     setJustCreated(token);
     setDescription("");
-    setExpiresDays("");
+    setExpiresDays(DEFAULT_EXPIRES_DAYS);
   };
 
   return (
@@ -134,7 +138,7 @@ export default function Tokens() {
               </label>
               <Input
                 id="token-expires"
-                placeholder="optional"
+                placeholder="never"
                 type="number"
                 min="1"
                 max="3650"
@@ -149,6 +153,8 @@ export default function Tokens() {
           {create.error && <ErrorState error={create.error} />}
         </CardBody>
       </Card>
+
+      <RattlerBuildPublishTip />
 
       {tokensQ.isLoading ? (
         <PageSpinner />

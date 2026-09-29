@@ -15,7 +15,15 @@ from conda_server import __version__
 from conda_server.api import about as about_api
 from conda_server.api import audit as audit_api
 from conda_server.api import auth as auth_api
-from conda_server.api import channels, health, packages, repodata, search, upstream
+from conda_server.api import (
+    channels,
+    health,
+    packages,
+    prefix_compat,
+    repodata,
+    search,
+    upstream,
+)
 from conda_server.cleanup import cleanup_loop
 from conda_server.config import get_settings
 from conda_server.db import dispose_engine
@@ -99,6 +107,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_api.router, prefix="/api")
     app.include_router(upstream.router, prefix="/api")
     app.include_router(about_api.router, prefix="/api")
+    app.include_router(prefix_compat.router)
     app.include_router(repodata.router)
 
     _mount_frontend(app)
