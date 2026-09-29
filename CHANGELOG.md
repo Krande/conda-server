@@ -2,6 +2,13 @@
 
 
 
+## v0.9.0 (2026-09-29)
+
+### Feature
+
+* feat: Account-menu appearance settings, 180-day token default, rattler-build publishing (#25) ([`99d9b2a`](https://github.com/Krande/conda-server/commit/99d9b2a67c621c70595f2a70b1421e36c4698156))
+
+
 ## v0.8.4 (2026-08-28)
 
 ### Chore
