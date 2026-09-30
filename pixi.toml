@@ -13,6 +13,9 @@ dev = { features = ["prod", "dev"], solve-group = "default" }
 # runs (the ruff pin in [feature.lint.dependencies] below). Its own
 # solve-group keeps these hard pins from constraining the app's dependency solve.
 lint = { features = ["lint"], solve-group = "lint" }
+# The README screenshots (`pixi run ui-stories`): the server plus Playwright.
+# Shares the app's solve-group so the server it boots is the one prod runs.
+ui = { features = ["prod", "ui"], solve-group = "default" }
 
 [feature.prod.dependencies]
 python = "3.12.*"
@@ -63,7 +66,7 @@ python = "3.12.*"
 ruff = "==0.16.3"
 
 [feature.lint.tasks]
-lint = { cmd = "ruff format --check src tests && ruff check src tests", description = "Check formatting + lint with the CI-pinned ruff" }
+lint = { cmd = "ruff format --check src tests scripts && ruff check src tests scripts",description = "Check formatting + lint with the CI-pinned ruff" }
 
 [feature.prod.tasks]
 serve = { cmd = "uvicorn conda_server.app:create_app --factory --host 0.0.0.0 --port 8000 --reload", description = "Run the API server (dev mode with reload)" }
@@ -73,7 +76,7 @@ reindex = { cmd = "conda-server reindex", description = "Reindex a channel from 
 
 [feature.dev.tasks]
 test = { cmd = "pytest -q", description = "Run the test suite" }
-format = { cmd = "ruff format src tests", description = "Format the codebase" }
+format = { cmd = "ruff format src tests scripts",description = "Format the codebase" }
 typecheck = { cmd = "mypy src", description = "Type-check the codebase" }
 frontend-install = { cmd = "npm install", cwd = "frontend", description = "Install frontend deps" }
 frontend-dev = { cmd = "npm run dev", cwd = "frontend", description = "Run Vite dev server (proxies /api to backend on :8000)" }
@@ -87,6 +90,43 @@ frontend-lint = { cmd = "npm run lint", cwd = "frontend", description = "Lint th
 e2e-server = { cmd = "rm -f /tmp/conda-server-e2e.db && alembic upgrade head && uvicorn conda_server.app:create_app --factory --host 127.0.0.1 --port 8001", description = "Backend for Playwright (test config, not for humans)", env = { CONDA_SERVER_DATABASE__URL = "sqlite+aiosqlite:////tmp/conda-server-e2e.db", CONDA_SERVER_STORAGE__BACKEND = "local", CONDA_SERVER_STORAGE__URL = "/tmp/conda-server-e2e", CONDA_SERVER_AUTH__SESSION_SECRET = "test-secret-not-for-production-use-at-all", CONDA_SERVER_AUTH__SESSION_HTTPS_ONLY = "false", CONDA_SERVER_LOGGING__FORMAT = "console" } }
 e2e = { cmd = "npm run test:e2e", cwd = "frontend", depends-on = ["frontend-build"], description = "Run Playwright smoke tests (builds the frontend first, spawns backend)" }
 e2e-install = { cmd = "npx playwright install --with-deps chromium", cwd = "frontend", description = "Install Playwright's browser binary (once per machine)" }
+
+# ── UI stories (README screenshots) ──────────────────────────────────────────
+
+[feature.ui.dependencies]
+# conda-forge ships the bindings (playwright-python) and the Node driver they
+# talk to (playwright) as two packages without tying their versions, and a
+# mismatched pair fails at launch with "timeout: expected float, got
+# undefined" — so both are pinned to the same minor. Move them together.
+playwright-python = "1.62.*"
+playwright = "1.62.*"
+
+# Browsers go under .pixi/ rather than Playwright's per-user cache, so the
+# download belongs to this checkout and pixi can see it as the install task's
+# output: `ui-stories` depends on the install, and pixi skips it while the
+# INSTALLATION_COMPLETE markers are there and the environment hasn't changed.
+# The SPA is built in the dev environment (it has Node and the npm deps), and
+# the stories screenshot that build as the backend serves it.
+[feature.ui.tasks.ui-stories]
+cmd = "python scripts/ui_stories.py"
+depends-on = [
+    "ui-stories-install",
+    { task = "frontend-build", environment = "dev" },
+]
+env = { PLAYWRIGHT_BROWSERS_PATH = ".pixi/ms-playwright" }
+description = "Boot a throwaway server with demo channels and screenshot the web UI into docs/screenshots (--list, --story NAME, --theme, --keep)"
+
+[feature.ui.tasks.ui-stories-install]
+cmd = "playwright install chromium"
+# NODE_USE_SYSTEM_CA: the downloader is Node, which trusts only its bundled
+# CAs by default and fails behind a TLS-inspecting proxy; the OS store is what
+# every other tool on the machine trusts.
+env = { PLAYWRIGHT_BROWSERS_PATH = ".pixi/ms-playwright", NODE_USE_SYSTEM_CA = "1" }
+outputs = [
+    ".pixi/ms-playwright/chromium-*/INSTALLATION_COMPLETE",
+    ".pixi/ms-playwright/chromium_headless_shell-*/INSTALLATION_COMPLETE",
+]
+description = "Download the Chromium build ui-stories drives (cached; ui-stories runs it for you)"
 
 [feature.prod.tasks.docker-build]
 cmd = "docker build -t conda-server:dev ."
