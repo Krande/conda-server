@@ -116,6 +116,10 @@ export interface Package {
 
 export interface ApiToken {
   id: number;
+  // First few characters of the raw token (e.g. "cs_AbC12xY"), so a token
+  // held locally can be matched to its row. Null for tokens minted
+  // before the prefix was recorded.
+  token_prefix: string | null;
   description: string | null;
   created_at: string;
   expires_at: string | null;

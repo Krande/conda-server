@@ -44,6 +44,9 @@ class ApiKey(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     key_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    # Leading characters of the raw token, kept so users can tell which of
+    # their tokens is which. Null for keys minted before this was recorded.
+    token_prefix: Mapped[str | None] = mapped_column(String(16))
     description: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

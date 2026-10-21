@@ -172,6 +172,9 @@ export default function Tokens() {
                     Description
                   </th>
                   <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Token
+                  </th>
+                  <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
                     Created
                   </th>
                   <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
@@ -193,6 +196,13 @@ export default function Tokens() {
                         <span className="font-normal italic text-slate-400 dark:text-slate-500">
                           no description
                         </span>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-5 py-3 font-mono text-xs text-slate-600 dark:text-slate-300">
+                      {t.token_prefix ? (
+                        `${t.token_prefix}…`
+                      ) : (
+                        <span className="font-sans text-slate-400 dark:text-slate-500">—</span>
                       )}
                     </td>
                     <td className="whitespace-nowrap px-5 py-3 text-xs text-slate-500 dark:text-slate-400">

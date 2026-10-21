@@ -48,8 +48,10 @@ async def test_mint_returns_token_once_and_lists_it(app, client):
     items = listed.json()
     assert len(items) == 1
     assert items[0]["description"] == "ci runner"
-    # The raw token must not leak in the list response.
+    # The raw token must not leak in the list response, only a short prefix.
     assert "token" not in items[0]
+    assert items[0]["token_prefix"] == raw_token[:10]
+    assert body["token_prefix"] == raw_token[:10]
 
 
 @pytest.mark.asyncio

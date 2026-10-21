@@ -19,7 +19,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
-from conda_server.auth import current_user, generate_token, hash_token
+from conda_server.auth import current_user, generate_token, hash_token, token_display_prefix
 from conda_server.config import get_settings
 from conda_server.db import SessionDep
 from conda_server.models import ApiKey, User
@@ -125,6 +125,7 @@ class TokenCreate(BaseModel):
 
 class TokenOut(BaseModel):
     id: int
+    token_prefix: str | None
     description: str | None
     created_at: datetime
     expires_at: datetime | None
@@ -162,6 +163,7 @@ async def create_token(
     key = ApiKey(
         user_id=user.id,
         key_hash=hash_token(raw),
+        token_prefix=token_display_prefix(raw),
         description=payload.description,
         expires_at=expires_at,
     )
