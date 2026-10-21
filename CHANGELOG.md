@@ -2,6 +2,19 @@
 
 
 
+## v0.9.1 (2026-10-21)
+
+### Chore
+
+* chore(ci): bump deputy to v0.9.0 (#27) ([`0b0417b`](https://github.com/Krande/conda-server/commit/0b0417bd97c683c4f9bab160dc2bad1a4e4cc0d3))
+
+* chore(docs): generated UI screenshots, a user-facing README, and DEVELOPERS.md (#26) ([`f35eff4`](https://github.com/Krande/conda-server/commit/f35eff444be6031e3afdae49273caac598e881ec))
+
+### Fix
+
+* fix: show token prefix in the API tokens list (#28) ([`3791d1a`](https://github.com/Krande/conda-server/commit/3791d1a9399bc5c1d076531e3ac46ceee90f71bb))
+
+
 ## v0.9.0 (2026-09-29)
 
 ### Feature
