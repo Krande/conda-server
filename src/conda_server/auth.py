@@ -32,6 +32,15 @@ def generate_token() -> str:
     return f"{TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
 
 
+def token_display_prefix(token: str) -> str:
+    """Leading characters of a token, safe to store and show in listings.
+
+    ``cs_`` plus 7 random characters: enough to tell tokens apart, while
+    leaving the remaining ~250 bits of the secret undisclosed.
+    """
+    return token[: len(TOKEN_PREFIX) + 7]
+
+
 async def current_user_optional(request: Request, session: SessionDep) -> User | None:
     """Resolve a User from either a session cookie or a bearer token.
 
